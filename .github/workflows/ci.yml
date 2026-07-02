@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure + build (Release)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+      - name: test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Differential fuzz under ASan + UBSan: catches use-after-free, OOB, leaks,
+      # and undefined behaviour on top of the correctness oracle.
+      - name: asan + ubsan
+        run: |
+          c++ -std=c++20 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+              -DFUZZ_OPS=20000 -Iinclude -Itests tests/test_orderbook.cpp -o ob_asan
+          ./ob_asan
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build + run benchmark
+        run: |
+          c++ -std=c++20 -O3 -DNDEBUG -march=native -Iinclude bench/bench.cpp -o ob_bench
+          ./ob_bench
