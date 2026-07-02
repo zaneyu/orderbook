@@ -9,6 +9,7 @@
 // word, set iff that word is non-zero. A find touches at most ~ticks/4096 summary
 // words, i.e. a handful for any realistic tick count.
 //
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -81,8 +82,11 @@ private:
     // Shifts guarded against the shift-by-64 UB (a full shift clears the word).
     static std::uint64_t shl(std::uint64_t v, std::size_t k) { return k >= 64 ? 0ull : v << k; }
     static std::uint64_t shr(std::uint64_t v, std::size_t k) { return k >= 64 ? 0ull : v >> k; }
-    static std::size_t ctz(std::uint64_t v) { return static_cast<std::size_t>(__builtin_ctzll(v)); }
-    static std::size_t msb(std::uint64_t v) { return 63 - static_cast<std::size_t>(__builtin_clzll(v)); }
+    // Standard <bit> intrinsics (C++20): portable (incl. MSVC) and well-defined —
+    // std::countr_zero(0) == 64 rather than the UB of __builtin_ctzll(0). Callers
+    // only pass non-zero words regardless.
+    static std::size_t ctz(std::uint64_t v) { return static_cast<std::size_t>(std::countr_zero(v)); }
+    static std::size_t msb(std::uint64_t v) { return 63 - static_cast<std::size_t>(std::countl_zero(v)); }
 
     std::size_t nbits_;
     std::vector<std::uint64_t> words_;
