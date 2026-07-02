@@ -4,6 +4,10 @@
 **allocation-free on the hot path**, and checked against a naive reference by differential
 fuzzing.
 
+**▶ Live demo: https://orderbook.pages.dev** — the same engine compiled to WebAssembly,
+matching a simulated market in your browser (hover the depth, click a level to trade into
+it). Source in [`web/`](web/).
+
 ## Latency
 
 Single-threaded, one core, warm cache (Apple M-series, `-O3 -march=native`, 1M orders
