@@ -40,7 +40,8 @@ public:
     }
 
     // Insert or overwrite. Grows (reallocates) only if the load factor would exceed
-    // ~0.7 — never happens after a correctly sized construction.
+    // ~0.7 — which never happens after a correctly sized construction. Steady-state
+    // allocation-freedom therefore requires passing `expected_orders` to the ctor.
     void set(OrderId k, std::uint32_t v) {
         if ((size_ + 1) * 10 >= cap_ * 7) grow();
         std::size_t i = hash(k) & mask_;

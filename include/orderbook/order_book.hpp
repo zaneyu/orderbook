@@ -160,12 +160,16 @@ private:
         const std::uint32_t slot = alloc(id, price, qty, side);
         const std::size_t p = static_cast<std::size_t>(price);
         if (side == Side::Buy) {
-            link_back(bid_levels_[p], slot);
-            bid_occ_.set(p);
+            Level& lv = bid_levels_[p];
+            const bool was_empty = (lv.head == NIL);
+            link_back(lv, slot);
+            if (was_empty) bid_occ_.set(p);  // only the first order at a level flips the bit
             if (price > best_bid_) best_bid_ = price;
         } else {
-            link_back(ask_levels_[p], slot);
-            ask_occ_.set(p);
+            Level& lv = ask_levels_[p];
+            const bool was_empty = (lv.head == NIL);
+            link_back(lv, slot);
+            if (was_empty) ask_occ_.set(p);
             if (price < best_ask_) best_ask_ = price;
         }
         id_map_.set(id, slot);

@@ -45,7 +45,7 @@ public:
         std::uint64_t b = words_[w] & shl(~0ull, from & 63);  // bits in this word >= from
         if (b) return (w << 6) | ctz(b);
         std::size_t sw = w >> 6;
-        std::uint64_t sb = shl(summary_[sw], 0) & shl(~0ull, (w & 63) + 1);  // words in block > w
+        std::uint64_t sb = summary_[sw] & shl(~0ull, (w & 63) + 1);  // words in block > w
         while (true) {
             if (sb) {
                 const std::size_t nw = (sw << 6) | ctz(sb);
