@@ -132,7 +132,28 @@ body {
   color: var(--dim);
   border-bottom: 1px solid var(--line-soft);
 }
-.phdr .depthlbl { position: absolute; opacity: 0; }  /* label reserved; bars are self-evident */
+.cum-read {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--amber);
+}
+.hint {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.hint kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
 
 /* ---- depth ladder ---- */
 .ladder .rows { display: flex; flex-direction: column; }
@@ -146,7 +167,11 @@ body {
   padding: 0 14px;
   font-family: var(--mono);
   font-size: 13px;
+  cursor: pointer;
 }
+.lrow.empty { cursor: default; }
+.lrow:not(.empty):hover { background: rgba(239, 233, 221, 0.05); }
+.lrow.cum { background: rgba(242, 181, 74, 0.08); }  /* cumulative-depth highlight (no side stripe) */
 .lrow .lp { z-index: 1; }
 .lrow .lz { z-index: 1; text-align: right; color: var(--text); }
 .lrow.ask .lp { color: var(--ask); }

@@ -34,7 +34,7 @@
 
       <section class="grid">
         <div class="panel ladder">
-          <div class="phdr"><span>price</span><span>size</span><span class="depthlbl">depth</span></div>
+          <div class="phdr"><span>price</span><span id="cum" class="cum-read"></span><span>size</span></div>
           <div id="asks" class="rows asks"></div>
           <div id="mid" class="midline"><span id="midtxt"></span></div>
           <div id="bids" class="rows bids"></div>
@@ -71,6 +71,10 @@
           <button type="submit" class="btn primary">submit</button>
           <span id="fillmsg" class="fillmsg"></span>
         </form>
+        <p class="hint">
+          Click a ladder level to rest an order there (bid side buys, ask side sells) ·
+          hover for cumulative depth · <kbd>space</kbd> pauses
+        </p>
       </section>
 
       <footer class="stats">
