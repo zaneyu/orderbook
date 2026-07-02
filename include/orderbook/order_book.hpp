@@ -69,6 +69,68 @@ public:
                                    : match<false>(id, 0, qty, out);
     }
 
+    // Immediate-or-cancel: match whatever crosses now; discard the rest (never rests).
+    // Returns the unfilled (cancelled) quantity.
+    Qty add_ioc(OrderId id, Side side, Price price, Qty qty, std::vector<Trade>& out) {
+        if (qty == 0 || price < 0 || price >= num_ticks_) return qty;
+        return (side == Side::Buy) ? match<true>(id, price, qty, out)
+                                   : match<false>(id, price, qty, out);
+    }
+
+    // Fill-or-kill: execute in full immediately or not at all. Returns 0 when filled,
+    // otherwise `qty` (killed — no fills, no state change).
+    Qty add_fok(OrderId id, Side side, Price price, Qty qty, std::vector<Trade>& out) {
+        if (qty == 0 || price < 0 || price >= num_ticks_) return qty;
+        if (!can_fill(side, price, qty)) return qty;
+        return (side == Side::Buy) ? match<true>(id, price, qty, out)   // can_fill => fully fills
+                                   : match<false>(id, price, qty, out);
+    }
+
+    // Modify a resting order (cancel/replace). A size *decrease at the same price*
+    // keeps time priority (in-place); any price change or size increase loses it (the
+    // order is re-queued at the back of the new level, and may cross). new_qty == 0
+    // cancels. Returns false if `id` is not resting.
+    bool modify(OrderId id, Price new_price, Qty new_qty, std::vector<Trade>& out) {
+        const std::uint32_t slot = id_map_.get(id);
+        if (slot == FlatIdMap::NIL) return false;
+        const Node& n = pool_[slot];
+        if (new_qty != 0 && new_price == n.price && new_qty <= n.qty) {
+            const Qty diff = n.qty - new_qty;
+            (n.side == Side::Buy ? bid_levels_ : ask_levels_)[static_cast<std::size_t>(n.price)].total -= diff;
+            pool_[slot].qty = new_qty;
+            return true;
+        }
+        const Side side = n.side;
+        cancel(id);
+        if (new_qty > 0 && new_price >= 0 && new_price < num_ticks_)
+            add_limit(id, side, new_price, new_qty, out);
+        return true;
+    }
+
+    // True if a `side` taker at `price` could be fully filled (>= qty) immediately.
+    bool can_fill(Side taker, Price limit, Qty qty) const {
+        std::uint64_t acc = 0;
+        if (taker == Side::Buy) {
+            for (Price p = best_ask_; p < num_ticks_ && p <= limit;) {
+                acc += ask_levels_[static_cast<std::size_t>(p)].total;
+                if (acc >= qty) return true;
+                const std::size_t nx = ask_occ_.next_at_or_above(static_cast<std::size_t>(p) + 1);
+                if (nx == Occupancy::npos) break;
+                p = static_cast<Price>(nx);
+            }
+        } else {
+            for (Price p = best_bid_; p >= 0 && p >= limit;) {
+                acc += bid_levels_[static_cast<std::size_t>(p)].total;
+                if (acc >= qty) return true;
+                if (p == 0) break;
+                const std::size_t px = bid_occ_.prev_at_or_below(static_cast<std::size_t>(p) - 1);
+                if (px == Occupancy::npos) break;
+                p = static_cast<Price>(px);
+            }
+        }
+        return false;
+    }
+
     // Cancel a resting order by id. Returns true if it existed and was removed.
     bool cancel(OrderId id) {
         const std::uint32_t slot = id_map_.get(id);

@@ -109,5 +109,47 @@ int main() {
     t1 = clk::now();
     row("mixed", t1 - t0, ops, "op");
 
+    // --- tail latency: per-op cancel distribution ------------------------------
+    // Means hide the tail that trading actually cares about. Honest caveats: this is
+    // steady_clock per op (coarse at this scale) on an UNPINNED thread. p50..p99
+    // reflect the algorithm (the spread is cache-miss variance on random-order
+    // cancellation); the p99.9+ tail is OS scheduling, not malloc (the hot path
+    // allocates nothing). Real tail characterisation needs core isolation + a cycle
+    // counter (rdtsc) -- out of scope for a portable microbench.
+    {
+        const std::size_t M = 200000;
+        std::vector<std::uint32_t> ov(M);
+        for (std::size_t i = 0; i < M; ++i) {
+            const auto a = clk::now();
+            const auto b = clk::now();
+            ov[i] = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+        }
+        std::sort(ov.begin(), ov.end());
+        const std::uint32_t clock_ns = ov[M / 2];  // net the clock-call cost out of ~70ns samples
+
+        OrderBook lb(TICKS, N);
+        for (std::size_t i = 0; i < N; ++i) {
+            sink.clear();
+            lb.add_limit(static_cast<OrderId>(i + 1), Side::Buy, prices[i], qtys[i], sink);
+        }
+        std::shuffle(order.begin(), order.end(), rng);
+        std::vector<std::uint32_t> lat(N);
+        for (std::size_t i = 0; i < N; ++i) {
+            const auto a = clk::now();
+            lb.cancel(static_cast<OrderId>(order[i] + 1));
+            const auto b = clk::now();
+            lat[i] = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+        }
+        std::sort(lat.begin(), lat.end());
+        auto pct = [&](double q) {
+            const long v = static_cast<long>(lat[static_cast<std::size_t>(q * (N - 1))]) - clock_ns;
+            return v < 0 ? 0L : v;
+        };
+        std::printf("\n  cancel latency (ns, ~%u ns clock overhead netted out):\n", clock_ns);
+        std::printf("    p50 %ld   p90 %ld   p99 %ld   p99.9 %ld   max %ld\n",
+                    pct(0.50), pct(0.90), pct(0.99), pct(0.999),
+                    static_cast<long>(lat.back()) - clock_ns);
+    }
+
     return 0;
 }

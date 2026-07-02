@@ -128,6 +128,76 @@ TEST(rejects_bad_orders) {
     CHECK_EQ(b.resting_orders(), std::size_t{1});
 }
 
+// ------------------------------------------------------ order-type unit scenarios
+
+TEST(ioc_matches_then_discards) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Sell, 100, 6, fills);
+    fills.clear();
+    CHECK_EQ(b.add_ioc(2, Side::Buy, 100, 10, fills), Qty{4});  // 6 filled, 4 discarded
+    CHECK_EQ(fills.size(), std::size_t{1});
+    CHECK(!b.has_bid());  // remainder never rests
+    CHECK(!b.has_ask());
+}
+
+TEST(fok_kills_when_insufficient) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Sell, 100, 6, fills);
+    fills.clear();
+    CHECK_EQ(b.add_fok(2, Side::Buy, 100, 10, fills), Qty{10});  // only 6 avail -> kill
+    CHECK(fills.empty());
+    CHECK_EQ(b.qty_at(Side::Sell, 100), Qty{6});  // untouched
+}
+
+TEST(fok_fills_across_levels_when_sufficient) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Sell, 100, 6, fills);
+    b.add_limit(2, Side::Sell, 101, 6, fills);
+    fills.clear();
+    CHECK_EQ(b.add_fok(3, Side::Buy, 101, 10, fills), Qty{0});  // 12 avail within limit
+    CHECK_EQ(fills.size(), std::size_t{2});
+    CHECK_EQ(b.qty_at(Side::Sell, 101), Qty{2});
+}
+
+TEST(modify_decrease_keeps_priority) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 100, 10, fills);  // older
+    b.add_limit(2, Side::Buy, 100, 10, fills);  // younger
+    CHECK(b.modify(1, 100, 5, fills));          // shrink same price -> keeps front slot
+    fills.clear();
+    b.add_limit(3, Side::Sell, 100, 6, fills);  // hits id1 (5) then id2 (1)
+    CHECK_EQ(fills[0].maker, OrderId{1});
+    CHECK_EQ(fills[0].qty, Qty{5});
+    CHECK_EQ(fills[1].maker, OrderId{2});
+}
+
+TEST(modify_increase_loses_priority) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 100, 5, fills);
+    b.add_limit(2, Side::Buy, 100, 5, fills);
+    CHECK(b.modify(1, 100, 8, fills));          // grow -> requeued behind id2
+    fills.clear();
+    b.add_limit(3, Side::Sell, 100, 5, fills);
+    CHECK_EQ(fills[0].maker, OrderId{2});        // id2 now first
+}
+
+TEST(modify_reprice_can_cross) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Sell, 102, 5, fills);
+    b.add_limit(2, Side::Buy, 100, 5, fills);
+    fills.clear();
+    CHECK(b.modify(2, 102, 5, fills));           // reprice bid up -> crosses the ask
+    CHECK_EQ(fills.size(), std::size_t{1});
+    CHECK_EQ(fills[0].maker, OrderId{1});
+    CHECK(!b.has_ask());
+}
+
 // ------------------------------------------------------------ differential fuzz
 
 namespace {
@@ -160,7 +230,7 @@ void run_fuzz(std::uint64_t seed, int n_ops) {
         const int roll = static_cast<int>(rng() % 100);
         fa.clear();
         rb.clear();
-        if (roll < 55) {  // add limit
+        if (roll < 40) {  // add limit
             const OrderId id = next_id++;
             const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
             const Price price = pick_price();
@@ -169,11 +239,34 @@ void run_fuzz(std::uint64_t seed, int n_ops) {
             const Qty r2 = ref.add_limit(id, side, price, qty, rb);
             if (r1 != r2) ++mismatches;
             if (r1 > 0) live.push_back(id);
-        } else if (roll < 75) {  // market
+        } else if (roll < 52) {  // market
             const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
             const Qty qty = pick_qty();
-            const OrderId id = next_id++;
-            if (fast.add_market(id, side, qty, fa) != ref.add_market(id, side, qty, rb)) ++mismatches;
+            if (fast.add_market(next_id, side, qty, fa) != ref.add_market(next_id, side, qty, rb))
+                ++mismatches;
+            ++next_id;
+        } else if (roll < 64) {  // IOC
+            const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
+            const Price price = pick_price();
+            const Qty qty = pick_qty();
+            if (fast.add_ioc(next_id, side, price, qty, fa) != ref.add_ioc(next_id, side, price, qty, rb))
+                ++mismatches;
+            ++next_id;
+        } else if (roll < 76) {  // FOK
+            const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
+            const Price price = pick_price();
+            const Qty qty = pick_qty();
+            if (fast.add_fok(next_id, side, price, qty, fa) != ref.add_fok(next_id, side, price, qty, rb))
+                ++mismatches;
+            ++next_id;
+        } else if (roll < 88 && !live.empty()) {  // modify a (possibly stale) id
+            const OrderId id = live[rng() % live.size()];
+            const Price np = pick_price();
+            const Qty nq = (rng() % 8 == 0) ? 0 : pick_qty();  // occasionally modify-cancels
+            const bool m1 = fast.modify(id, np, nq, fa);
+            const bool m2 = ref.modify(id, np, nq, rb);
+            if (m1 != m2) ++mismatches;
+            if (m1 && nq > 0) live.push_back(id);  // may rest again under same id
         } else if (!live.empty()) {  // cancel a (possibly stale) id
             const std::size_t k = rng() % live.size();
             const OrderId id = live[k];

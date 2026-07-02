@@ -19,6 +19,21 @@ over a 65,536-tick book). `make bench`:
 `mixed` is a realistic interleave of adds, cancels, and marketable orders — the number
 that reflects normal use.
 
+**Tail latency** matters more than the mean in trading. Per-op `cancel`, netting out the
+clock call (steady_clock, unpinned thread): **p50 ~85 ns, p99 ~330 ns**. The p50→p99 spread
+is cache-miss variance on random-order cancellation; the p99.9+ tail (µs) is OS scheduling,
+not the algorithm — the hot path allocates nothing, so there are no malloc/rehash spikes.
+Characterising the true far tail needs core isolation + a cycle counter; the benchmark is
+honest that it doesn't do that.
+
+## Operations
+
+Limit, market, **IOC** (immediate-or-cancel), **FOK** (fill-or-kill), **modify**
+(cancel/replace), and cancel — all price-time priority. `modify` keeps time priority on a
+same-price size *decrease* and re-queues (loses priority, may cross) on any price change or
+size increase, the standard exchange rule. Every one is checked against the reference in the
+differential fuzz.
+
 ## Allocation-free hot path — and it's proven, not asserted
 
 After a sized construction, `add_limit` / `cancel` / `add_market` perform **zero heap
@@ -33,9 +48,10 @@ across 100k rests + 100k matches + 100k cancels (`tests/test_alloc_audit.cpp`).
 A matching engine is only as good as its correctness proof. The core is validated by a
 **differential fuzz test**: the same stream of random operations is applied to the fast
 engine *and* to a deliberately naive `ReferenceBook` (std::map + std::deque), and after
-every operation their **fills and full book state are asserted identical**. 180,000 ops
-across three seeds, plus targeted unit scenarios. The two supporting data structures are
-fuzzed the same way against obvious references:
+every operation their **fills and full book state are asserted identical** — across limit,
+market, IOC, FOK, modify, and cancel. 180,000 ops across three seeds, plus targeted unit
+scenarios per order type. The two supporting data structures are fuzzed the same way against
+obvious references:
 
 - `test_orderbook`  — engine vs naive reference book (differential fuzz + units)
 - `test_occupancy`  — the best-pointer bitmap vs a brute-force `std::set`
@@ -85,8 +101,11 @@ book.add_limit(2, Side::Buy,  /*price=*/101, /*qty=*/6,  fills);  // crosses -> 
 // fills == { Trade{taker=2, maker=1, price=101, qty=6} }
 
 book.best_ask();                 // 101  (4 left resting; valid only when has_ask())
+book.modify(1, 101, 3, fills);   // shrink at same price -> keeps time priority
+book.add_ioc(4, Side::Buy, 101, 100, fills);   // fills what crosses, discards the rest
+book.add_fok(5, Side::Buy, 101, 100, fills);   // all-or-nothing (0 if filled, else qty)
 book.cancel(1);                  // true
-book.add_market(3, Side::Buy, 100, fills);  // sweeps the opposite side; never rests
+book.add_market(6, Side::Buy, 100, fills);  // sweeps the opposite side; never rests
 ```
 
 Header-only: `#include "orderbook/order_book.hpp"` and add `include/` to your path.
@@ -122,9 +141,9 @@ Deliberately focused: single-threaded, single-symbol, integer tick prices, limit
 market orders with price-time priority. Accessors expose sentinels on an empty book
 (`best_bid() == -1`, `best_ask() == num_ticks()`), valid only when `has_bid()/has_ask()`.
 `Qty` is 32-bit and level totals are not saturated — fine within the intended range.
-Natural extensions (not included): IOC/FOK and stop orders, per-symbol sharding, a
-lock-free SPSC ingress, and L2/L3 snapshot streaming. The engine is the core; those are
-layers on top of it.
+Natural extensions (not included): stop/pegged orders, per-symbol sharding, a lock-free
+SPSC ingress, and L2/L3 snapshot streaming. The engine is the core; those are layers on
+top of it.
 
 ## License
 

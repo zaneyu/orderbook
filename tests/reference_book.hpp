@@ -7,6 +7,7 @@
 // fast book is buggy.
 //
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <set>
@@ -42,6 +43,59 @@ public:
         else
             while (qty > 0 && !bids_.empty()) qty = fill_front(bids_, bids_.rbegin()->first, id, qty, out);
         return qty;
+    }
+
+    Qty add_ioc(OrderId id, Side side, Price price, Qty qty, std::vector<Trade>& out) {
+        if (qty == 0 || price < 0 || price >= num_ticks_) return qty;
+        if (side == Side::Buy)
+            while (qty > 0 && !asks_.empty() && asks_.begin()->first <= price)
+                qty = fill_front(asks_, asks_.begin()->first, id, qty, out);
+        else
+            while (qty > 0 && !bids_.empty() && bids_.rbegin()->first >= price)
+                qty = fill_front(bids_, bids_.rbegin()->first, id, qty, out);
+        return qty;  // never rests
+    }
+
+    Qty add_fok(OrderId id, Side side, Price price, Qty qty, std::vector<Trade>& out) {
+        if (qty == 0 || price < 0 || price >= num_ticks_) return qty;
+        std::uint64_t acc = 0;
+        if (side == Side::Buy) {
+            for (const auto& kv : asks_) {
+                if (kv.first > price) break;
+                for (const auto& r : kv.second) acc += r.qty;
+                if (acc >= qty) break;
+            }
+        } else {
+            for (auto it = bids_.rbegin(); it != bids_.rend(); ++it) {
+                if (it->first < price) break;
+                for (const auto& r : it->second) acc += r.qty;
+                if (acc >= qty) break;
+            }
+        }
+        if (acc < qty) return qty;                 // kill
+        return add_ioc(id, side, price, qty, out);  // fully fills
+    }
+
+    bool modify(OrderId id, Price new_price, Qty new_qty, std::vector<Trade>& out) {
+        for (int s = 0; s < 2; ++s) {
+            Book& book = (s == 0) ? bids_ : asks_;
+            const Side side = (s == 0) ? Side::Buy : Side::Sell;
+            for (auto it = book.begin(); it != book.end(); ++it) {
+                for (auto jt = it->second.begin(); jt != it->second.end(); ++jt) {
+                    if (jt->id != id) continue;
+                    if (new_qty != 0 && new_price == it->first && new_qty <= jt->qty) {
+                        jt->qty = new_qty;  // in-place, keeps priority
+                        return true;
+                    }
+                    it->second.erase(jt);
+                    if (it->second.empty()) book.erase(it);
+                    ids_.erase(id);
+                    if (new_qty > 0) add_limit(id, side, new_price, new_qty, out);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     bool cancel(OrderId id) {
