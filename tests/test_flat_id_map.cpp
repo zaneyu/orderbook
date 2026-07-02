@@ -16,6 +16,12 @@ namespace {
 std::size_t g_new = 0, g_del = 0;
 bool g_count = false;
 }  // namespace
+// GCC's -Wmismatched-new-delete false-positives on a global new/delete pair that
+// deliberately and consistently routes through malloc/free (what this audit needs).
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
 void* operator new(std::size_t n) {
     if (g_count) ++g_new;
     if (void* p = std::malloc(n ? n : 1)) return p;
@@ -26,6 +32,9 @@ void operator delete(void* p) noexcept {
     std::free(p);
 }
 void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 TEST(flat_map_matches_unordered_map) {
     FlatIdMap flat;
