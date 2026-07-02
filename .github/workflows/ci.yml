@@ -19,13 +19,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Differential fuzz under ASan + UBSan: catches use-after-free, OOB, leaks,
-      # and undefined behaviour on top of the correctness oracle.
+      # Every test under ASan + UBSan: use-after-free, OOB, leaks, and undefined
+      # behaviour on top of the correctness oracle (differential fuzz, occupancy
+      # bitmap, flat map, allocation audit).
       - name: asan + ubsan
         run: |
-          c++ -std=c++20 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
-              -DFUZZ_OPS=20000 -Iinclude -Itests tests/test_orderbook.cpp -o ob_asan
-          ./ob_asan
+          for t in test_orderbook test_occupancy test_flat_id_map test_alloc_audit; do
+            c++ -std=c++20 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+                -DFUZZ_OPS=20000 -Iinclude -Itests tests/$t.cpp -o $t.asan
+            ./$t.asan
+          done
 
   bench:
     runs-on: ubuntu-latest

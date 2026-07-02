@@ -4,22 +4,25 @@
 //
 // Design: an array-indexed price ladder. Prices are integer ticks in [0, num_ticks).
 // Each side keeps a vector<Level> indexed by tick; each Level is an intrusive FIFO
-// (doubly linked list) of order nodes drawn from a reused pool. Best bid / best ask
-// are cached tick indices.
+// (doubly linked list) of order nodes drawn from a reused pool. A two-level occupancy
+// bitmap per side (see occupancy.hpp) tracks which levels are non-empty, so moving the
+// cached best-bid / best-ask pointer to the next populated level is near-O(1) instead
+// of an O(ticks) linear scan.
 //
-//   add_limit  : O(1) to rest; matching is O(fills)
-//   cancel     : O(1) unlink (+ amortized best-pointer walk when a best level empties)
-//   match      : O(1) per fill
+//   add_limit : O(1) to rest; O(fills) when it crosses
+//   cancel    : O(1) unlink + near-O(1) best refresh when a best level empties
+//   match     : O(1) per fill + near-O(1) best refresh per emptied level
 //
-// The best-pointer walk on an emptied best level is O(ticks) worst case but amortized
-// away in practice (the pointer only moves as levels are consumed). All hot paths are
-// allocation-free after warm-up: nodes come from a free list, not new/delete.
+// All hot paths are allocation-free once sized: order nodes come from a free list and
+// the id->slot index is an open-addressing flat map (flat_id_map.hpp), not a node-based
+// std::unordered_map. tests/test_alloc_audit.cpp proves zero new/delete on the hot path.
 //
 #include <cstddef>
 #include <cstdint>
-#include <unordered_map>
 #include <vector>
 
+#include "flat_id_map.hpp"
+#include "occupancy.hpp"
 #include "types.hpp"
 
 namespace ob {
@@ -33,12 +36,14 @@ public:
         : num_ticks_(num_ticks),
           bid_levels_(static_cast<std::size_t>(num_ticks)),
           ask_levels_(static_cast<std::size_t>(num_ticks)),
+          bid_occ_(static_cast<std::size_t>(num_ticks)),
+          ask_occ_(static_cast<std::size_t>(num_ticks)),
           best_bid_(-1),
-          best_ask_(num_ticks) {
+          best_ask_(num_ticks),
+          id_map_(reserve_orders) {
         if (reserve_orders) {
             pool_.reserve(reserve_orders);
             free_.reserve(reserve_orders);
-            id_map_.reserve(reserve_orders);
         }
     }
 
@@ -47,7 +52,7 @@ public:
     // to `out`. Returns the resting (unfilled) quantity. A duplicate/known id or an
     // out-of-range/zero-qty order is rejected (returns 0, no fills, no state change).
     Qty add_limit(OrderId id, Side side, Price price, Qty qty, std::vector<Trade>& out) {
-        if (qty == 0 || price < 0 || price >= num_ticks_ || id_map_.count(id)) return 0;
+        if (qty == 0 || price < 0 || price >= num_ticks_ || id_map_.contains(id)) return 0;
         Qty rem = (side == Side::Buy) ? match<true>(id, price, qty, out)
                                       : match<false>(id, price, qty, out);
         if (rem > 0) rest(id, side, price, rem);
@@ -55,7 +60,9 @@ public:
     }
 
     // Market order: match up to `qty` against the opposite side; never rests. Returns
-    // the unfilled quantity (nonzero only if the book ran dry).
+    // the unfilled quantity (nonzero only if the book ran dry). `id` is used only as the
+    // taker tag on emitted fills; since a market order never rests it is not indexed and
+    // not checked for uniqueness.
     Qty add_market(OrderId id, Side side, Qty qty, std::vector<Trade>& out) {
         if (qty == 0) return 0;
         return (side == Side::Buy) ? match<true>(id, num_ticks_ - 1, qty, out)
@@ -64,16 +71,23 @@ public:
 
     // Cancel a resting order by id. Returns true if it existed and was removed.
     bool cancel(OrderId id) {
-        auto it = id_map_.find(id);
-        if (it == id_map_.end()) return false;
-        const std::uint32_t slot = it->second;
-        const Node& n = pool_[slot];
-        const Side side = n.side;
-        const Price price = n.price;
-        unlink(side == Side::Buy ? bid_levels_ : ask_levels_, slot);
+        const std::uint32_t slot = id_map_.get(id);
+        if (slot == FlatIdMap::NIL) return false;
+        const Side side = pool_[slot].side;
+        const Price price = pool_[slot].price;
+        auto& levels = (side == Side::Buy) ? bid_levels_ : ask_levels_;
+        unlink(levels, slot);
         release(slot);
-        id_map_.erase(it);
-        fix_best_after_removal(side, price);
+        id_map_.erase(id);
+        if (levels[static_cast<std::size_t>(price)].head == NIL) {
+            if (side == Side::Buy) {
+                bid_occ_.clear(static_cast<std::size_t>(price));
+                if (price == best_bid_) refresh_best_bid(price - 1);
+            } else {
+                ask_occ_.clear(static_cast<std::size_t>(price));
+                if (price == best_ask_) refresh_best_ask(price + 1);
+            }
+        }
         return true;
     }
 
@@ -122,7 +136,6 @@ private:
     }
     void release(std::uint32_t slot) { free_.push_back(slot); }
 
-    // Append an already-allocated node to the tail of its price level's FIFO.
     void link_back(Level& lv, std::uint32_t slot) {
         Node& n = pool_[slot];
         n.prev = lv.tail;
@@ -133,7 +146,6 @@ private:
         lv.total += n.qty;
     }
 
-    // Remove an arbitrary node from its price level's FIFO.
     void unlink(std::vector<Level>& levels, std::uint32_t slot) {
         Node& n = pool_[slot];
         Level& lv = levels[static_cast<std::size_t>(n.price)];
@@ -146,17 +158,32 @@ private:
 
     void rest(OrderId id, Side side, Price price, Qty qty) {
         const std::uint32_t slot = alloc(id, price, qty, side);
+        const std::size_t p = static_cast<std::size_t>(price);
         if (side == Side::Buy) {
-            link_back(bid_levels_[static_cast<std::size_t>(price)], slot);
+            link_back(bid_levels_[p], slot);
+            bid_occ_.set(p);
             if (price > best_bid_) best_bid_ = price;
         } else {
-            link_back(ask_levels_[static_cast<std::size_t>(price)], slot);
+            link_back(ask_levels_[p], slot);
+            ask_occ_.set(p);
             if (price < best_ask_) best_ask_ = price;
         }
-        id_map_.emplace(id, slot);
+        id_map_.set(id, slot);
     }
 
-    // Match a taker against the opposite side up to its price limit. IsBuy taker
+    // best_ask_ := lowest occupied ask tick >= `from` (num_ticks_ if none).
+    void refresh_best_ask(Price from) {
+        const std::size_t r = ask_occ_.next_at_or_above(static_cast<std::size_t>(from < 0 ? 0 : from));
+        best_ask_ = (r == Occupancy::npos) ? num_ticks_ : static_cast<Price>(r);
+    }
+    // best_bid_ := highest occupied bid tick <= `from` (-1 if none / from < 0).
+    void refresh_best_bid(Price from) {
+        if (from < 0) { best_bid_ = -1; return; }
+        const std::size_t r = bid_occ_.prev_at_or_below(static_cast<std::size_t>(from));
+        best_bid_ = (r == Occupancy::npos) ? -1 : static_cast<Price>(r);
+    }
+
+    // Match a taker against the opposite side up to its price limit. An IsBuy taker
     // lifts asks with price <= limit; a seller hits bids with price >= limit.
     template <bool IsBuy>
     Qty match(OrderId taker, Price limit, Qty qty, std::vector<Trade>& out) {
@@ -185,40 +212,29 @@ private:
                     release(hs);
                 }
             }
-            if (lv.head == NIL) advance_best<IsBuy>();
+            if (lv.head == NIL) {
+                if constexpr (IsBuy) {
+                    ask_occ_.clear(static_cast<std::size_t>(at));
+                    refresh_best_ask(at + 1);
+                } else {
+                    bid_occ_.clear(static_cast<std::size_t>(at));
+                    refresh_best_bid(at - 1);
+                }
+            }
         }
         return qty;
-    }
-
-    // Move the best pointer off an emptied best level to the next non-empty one.
-    template <bool IsBuy>
-    void advance_best() {
-        if constexpr (IsBuy) {
-            do { ++best_ask_; } while (best_ask_ < num_ticks_ && ask_levels_[static_cast<std::size_t>(best_ask_)].head == NIL);
-        } else {
-            do { --best_bid_; } while (best_bid_ >= 0 && bid_levels_[static_cast<std::size_t>(best_bid_)].head == NIL);
-        }
-    }
-
-    // After a cancel, if the emptied level was the best, walk to the next non-empty.
-    void fix_best_after_removal(Side side, Price price) {
-        if (side == Side::Buy) {
-            if (price == best_bid_ && bid_levels_[static_cast<std::size_t>(price)].head == NIL)
-                while (best_bid_ >= 0 && bid_levels_[static_cast<std::size_t>(best_bid_)].head == NIL) --best_bid_;
-        } else {
-            if (price == best_ask_ && ask_levels_[static_cast<std::size_t>(price)].head == NIL)
-                while (best_ask_ < num_ticks_ && ask_levels_[static_cast<std::size_t>(best_ask_)].head == NIL) ++best_ask_;
-        }
     }
 
     Price num_ticks_;
     std::vector<Level> bid_levels_;
     std::vector<Level> ask_levels_;
+    Occupancy bid_occ_;
+    Occupancy ask_occ_;
     Price best_bid_;
     Price best_ask_;
     std::vector<Node> pool_;
     std::vector<std::uint32_t> free_;
-    std::unordered_map<OrderId, std::uint32_t> id_map_;
+    FlatIdMap id_map_;
 };
 
 }  // namespace ob
