@@ -3,6 +3,7 @@
 // are asserted identical after every operation.
 #include <cstdint>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "framework.hpp"
@@ -126,6 +127,28 @@ TEST(rejects_bad_orders) {
     b.add_limit(7, Side::Buy, 100, 5, fills);
     CHECK_EQ(b.add_limit(7, Side::Sell, 200, 5, fills), Qty{0});  // duplicate id rejected
     CHECK_EQ(b.resting_orders(), std::size_t{1});
+}
+
+TEST(l2_snapshot_walks_populated_levels_from_best) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 100, 5, fills);
+    b.add_limit(2, Side::Buy, 98, 3, fills);  // gap at 99
+    b.add_limit(3, Side::Buy, 98, 2, fills);  // aggregates to 5 at 98
+    std::vector<std::pair<Price, Qty>> lv;
+    b.for_levels(Side::Buy, 10, [&](Price p, Qty q) { lv.emplace_back(p, q); });
+    CHECK_EQ(lv.size(), std::size_t{2});
+    CHECK_EQ(lv[0].first, Price{100});
+    CHECK_EQ(lv[0].second, Qty{5});
+    CHECK_EQ(lv[1].first, Price{98});   // empty 99 skipped
+    CHECK_EQ(lv[1].second, Qty{5});
+
+    b.add_limit(4, Side::Sell, 105, 4, fills);
+    b.add_limit(5, Side::Sell, 107, 1, fills);
+    std::vector<std::pair<Price, Qty>> la;
+    b.for_levels(Side::Sell, 1, [&](Price p, Qty q) { la.emplace_back(p, q); });  // depth cap
+    CHECK_EQ(la.size(), std::size_t{1});
+    CHECK_EQ(la[0].first, Price{105});
 }
 
 // ------------------------------------------------------ order-type unit scenarios

@@ -167,6 +167,28 @@ public:
         return (side == Side::Buy ? bid_levels_ : ask_levels_)[static_cast<std::size_t>(price)].total;
     }
 
+    // L2 snapshot: visit up to `depth` populated levels from the best inward,
+    // calling f(price, aggregate_qty). O(depth) via the occupancy bitmap.
+    template <typename F>
+    void for_levels(Side side, int depth, F&& f) const {
+        if (side == Side::Buy) {
+            for (Price p = best_bid_; depth > 0 && p >= 0; --depth) {
+                f(p, bid_levels_[static_cast<std::size_t>(p)].total);
+                if (p == 0) break;
+                const std::size_t px = bid_occ_.prev_at_or_below(static_cast<std::size_t>(p) - 1);
+                if (px == Occupancy::npos) break;
+                p = static_cast<Price>(px);
+            }
+        } else {
+            for (Price p = best_ask_; depth > 0 && p < num_ticks_; --depth) {
+                f(p, ask_levels_[static_cast<std::size_t>(p)].total);
+                const std::size_t nx = ask_occ_.next_at_or_above(static_cast<std::size_t>(p) + 1);
+                if (nx == Occupancy::npos) break;
+                p = static_cast<Price>(nx);
+            }
+        }
+    }
+
 private:
     static constexpr std::uint32_t NIL = 0xFFFFFFFFu;
 

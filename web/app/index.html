@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>orderbook — live matching engine (WebAssembly)</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2314110d'/%3E%3Crect x='7' y='16' width='5' height='9' fill='%2346d19e'/%3E%3Crect x='14' y='11' width='5' height='14' fill='%23f2b54a'/%3E%3Crect x='21' y='7' width='5' height='18' fill='%23f0776b'/%3E%3C/svg%3E"
+    />
+    <meta
+      name="description"
+      content="A price-time-priority C++ matching engine compiled to WebAssembly, matching a live simulated order flow in your browser."
+    />
+  </head>
+  <body>
+    <div id="boot" class="boot">compiling order book…</div>
+
+    <main id="app" hidden>
+      <header class="top">
+        <div class="brand">
+          <span class="mark">/</span> orderbook
+          <span class="sub">price-time-priority matching engine · real C++ compiled to WebAssembly</span>
+        </div>
+        <a class="repo" href="https://github.com/zaneyu/orderbook" target="_blank" rel="noopener">source ↗</a>
+      </header>
+
+      <section class="quote">
+        <div class="q last"><span class="lbl">last</span><b id="last">—</b></div>
+        <div class="q"><span class="lbl">bid</span><b id="bid" class="bidc">—</b></div>
+        <div class="q"><span class="lbl">ask</span><b id="ask" class="askc">—</b></div>
+        <div class="q"><span class="lbl">spread</span><b id="spread">—</b></div>
+      </section>
+
+      <section class="grid">
+        <div class="panel ladder">
+          <div class="phdr"><span>price</span><span>size</span><span class="depthlbl">depth</span></div>
+          <div id="asks" class="rows asks"></div>
+          <div id="mid" class="midline"><span id="midtxt"></span></div>
+          <div id="bids" class="rows bids"></div>
+        </div>
+
+        <div class="panel tape">
+          <div class="phdr"><span>time &amp; sales</span><span>size</span></div>
+          <div id="tape" class="rows"></div>
+        </div>
+      </section>
+
+      <section class="controls">
+        <div class="row1">
+          <button id="play" class="btn primary">❚❚ pause</button>
+          <button id="reset" class="btn">reset</button>
+          <label class="speed">speed
+            <input id="speed" type="range" min="0" max="1200" step="50" value="250" />
+            <span id="speedv" class="mono">250</span>/frame
+          </label>
+        </div>
+        <form id="order" class="row2">
+          <div class="seg" id="sideSeg">
+            <button type="button" data-v="0" class="on">buy</button>
+            <button type="button" data-v="1">sell</button>
+          </div>
+          <select id="type" class="in">
+            <option value="0">limit</option>
+            <option value="1">market</option>
+            <option value="2">IOC</option>
+            <option value="3">FOK</option>
+          </select>
+          <input id="price" class="in mono" inputmode="decimal" value="100.00" />
+          <input id="qty" class="in mono" inputmode="numeric" value="50" />
+          <button type="submit" class="btn primary">submit</button>
+          <span id="fillmsg" class="fillmsg"></span>
+        </form>
+      </section>
+
+      <footer class="stats">
+        <span><b id="trades">0</b> trades</span>
+        <span><b id="resting">0</b> resting orders</span>
+        <span><b id="sps">0</b> engine ops/s (sim)</span>
+        <span class="dim">engine benchmarked at ~13M ops/s · allocation-free hot path</span>
+      </footer>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
