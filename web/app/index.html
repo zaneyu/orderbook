@@ -75,7 +75,7 @@
         <div class="tabs" role="tablist" aria-label="tools">
           <button role="tab" id="tab-trade" data-tab="trade" class="tab on" aria-selected="true" aria-controls="panel-trade">Trade</button>
           <button role="tab" id="tab-exec" data-tab="exec" class="tab" aria-selected="false" aria-controls="panel-exec" tabindex="-1">Execution</button>
-          <button role="tab" id="tab-maker" data-tab="maker" class="tab" aria-selected="false" aria-controls="panel-maker" tabindex="-1">Market maker</button>
+          <button role="tab" id="tab-strats" data-tab="strats" class="tab" aria-selected="false" aria-controls="panel-strats" tabindex="-1">Strategies</button>
         </div>
 
         <!-- Trade: manual order entry -->
@@ -146,32 +146,54 @@
           </p>
         </div>
 
-        <!-- Market maker: an automated two-sided quoter -->
-        <div class="tabpanel" id="panel-maker" data-panel="maker" role="tabpanel" aria-labelledby="tab-maker" hidden>
-          <div class="maker-ctrl">
-            <button id="mmToggle" type="button" class="btn primary" aria-pressed="false">start quoting</button>
-            <label class="fld">half-spread <input id="mmHalf" class="in mono" inputmode="numeric" value="1" aria-label="half spread in cents" />¢</label>
-            <label class="fld">size <input id="mmSize" class="in mono" inputmode="numeric" value="200" aria-label="quote size" /></label>
-            <label class="fld">inv limit <input id="mmInv" class="in mono" inputmode="numeric" value="2000" aria-label="inventory limit" /></label>
-            <button id="mmFlat" type="button" class="btn">reset P&amp;L</button>
+        <!-- Strategies: autonomous trading bots competing on the same book -->
+        <div class="tabpanel" id="panel-strats" data-panel="strats" role="tabpanel" aria-labelledby="tab-strats" hidden>
+          <div class="scenario" role="group" aria-label="market scenario">
+            <span class="fld" id="sclbl">scenario</span>
+            <button type="button" class="btn sc" data-sc="0" aria-pressed="false">calm</button>
+            <button type="button" class="btn sc" data-sc="1" aria-pressed="false">trending</button>
+            <button type="button" class="btn sc" data-sc="2" aria-pressed="false">choppy</button>
+            <button type="button" class="btn sc" data-sc="3" aria-pressed="false">volatile</button>
+            <button type="button" class="btn sc" data-sc="4" aria-pressed="false">flash crash</button>
           </div>
-          <div class="maker-dash">
-            <div class="mm-stat"><span class="lbl">total P&amp;L</span><b id="mmPnl" class="mono">$0.00</b></div>
-            <div class="mm-stat"><span class="lbl">spread capture</span><b id="mmReal" class="mono">$0.00</b></div>
-            <div class="mm-stat"><span class="lbl">inventory · adverse</span><b id="mmUnreal" class="mono">$0.00</b></div>
-            <div class="mm-stat"><span class="lbl">inventory</span><b id="mmInvv" class="mono">0</b></div>
-            <div class="mm-stat"><span class="lbl">quotes</span><b id="mmQuotes" class="mono">— / —</b></div>
-            <div class="mm-stat"><span class="lbl">fills</span><b id="mmFills" class="mono">0</b></div>
+
+          <div class="arena">
+            <!-- market maker -->
+            <div class="strat" data-strat="mm">
+              <button class="strat-toggle btn" id="mmToggle" type="button" aria-pressed="false">off</button>
+              <div class="strat-id"><b>Market maker</b><span>quotes both sides, earns the spread, fears inventory</span></div>
+              <div class="strat-pnl"><span class="lbl">P&amp;L</span><b id="mmPnl" class="mono">$0.00</b></div>
+              <div class="strat-pos"><span class="lbl">inventory</span><b id="mmInvv" class="mono">0</b></div>
+              <div class="strat-extra mono" id="mmExtra">spread — · adverse — · quotes —/—</div>
+              <div class="strat-cfg">
+                <label class="fld">½-spread <input id="mmHalf" class="in mono" inputmode="numeric" value="1" aria-label="half spread in cents" />¢</label>
+                <label class="fld">size <input id="mmSize" class="in mono" inputmode="numeric" value="200" aria-label="quote size" /></label>
+                <label class="fld">inv cap <input id="mmInv" class="in mono" inputmode="numeric" value="2000" aria-label="inventory limit" /></label>
+              </div>
+            </div>
+            <!-- momentum -->
+            <div class="strat" data-strat="mom">
+              <button class="strat-toggle btn" id="momToggle" type="button" aria-pressed="false">off</button>
+              <div class="strat-id"><b>Momentum</b><span>buys strength, sells weakness — rides trends, whipsaws in chop</span></div>
+              <div class="strat-pnl"><span class="lbl">P&amp;L</span><b id="momPnl" class="mono">$0.00</b></div>
+              <div class="strat-pos"><span class="lbl">position</span><b id="momPos" class="mono">0</b></div>
+              <div class="strat-sig"><span class="lbl">signal</span><span class="sigbar"><i id="momSig"></i></span></div>
+            </div>
+            <!-- mean reversion -->
+            <div class="strat" data-strat="mr">
+              <button class="strat-toggle btn" id="mrToggle" type="button" aria-pressed="false">off</button>
+              <div class="strat-id"><b>Mean reversion</b><span>fades moves back to the mean — wins ranges, bleeds in trends</span></div>
+              <div class="strat-pnl"><span class="lbl">P&amp;L</span><b id="mrPnl" class="mono">$0.00</b></div>
+              <div class="strat-pos"><span class="lbl">position</span><b id="mrPos" class="mono">0</b></div>
+              <div class="strat-sig"><span class="lbl">signal</span><span class="sigbar"><i id="mrSig"></i></span></div>
+            </div>
           </div>
+
           <canvas id="mmChart" class="mm-chart" aria-hidden="true"></canvas>
-          <div class="mm-invbar" aria-hidden="true"><span class="mm-invmid"></span><i id="mmInvFill"></i></div>
-          <p class="hint">
-            The maker quotes both sides. <b>Spread capture</b> is the edge earned vs fair
-            value on every fill; <b>inventory · adverse</b> is the mark-to-market of the
-            position it's left holding (total = spread + inventory). It builds inventory when
-            the market runs one way — turn up <b>turbulence</b> or fire <b>news</b> and watch
-            the spread grind up while adverse selection eats it.
-          </p>
+          <div class="strat-foot">
+            <button id="stratFlat" type="button" class="btn">reset all P&amp;L</button>
+            <span class="hint">Cumulative P&amp;L of each running bot. Pick a <b>scenario</b> and watch who wins: momentum in trends, mean reversion in choppy markets, the maker on spread until adverse selection bites.</span>
+          </div>
         </div>
       </section>
 

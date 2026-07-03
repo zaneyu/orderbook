@@ -11,8 +11,9 @@ matching a simulated market in your browser, with two applications built on top 
   track your working orders' fills, average price, and live P&L.
 - **Execution & TCA** — work a parent order via Market / TWAP / Passive and measure
   slippage vs the arrival mid (bps), fill rate, and market impact.
-- **Market maker** — an inventory-skewed two-sided quoter with live P&L split into
-  spread capture vs adverse selection.
+- **Strategies** — three autonomous bots (inventory-skewed market maker, momentum,
+  mean-reversion) trading the same book, with scenario presets (calm / trending / choppy
+  / volatile / flash crash) to watch which style wins by regime.
 
 The price process is a real one (stochastic volatility, trends, fat-tailed news jumps).
 Source in [`web/`](web/).

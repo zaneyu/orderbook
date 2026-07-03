@@ -32,10 +32,14 @@ Two applications are built on the same engine, in tabs:
   price vs the arrival mid (slippage, in bps), fill rate, and the mid move over the
   window. Run the same order a few times to compare strategies — the best-execution
   trade-off, measured the way a desk measures it.
-- **Market maker** — an automated two-sided quoter with inventory-skewed (Avellaneda–
-  Stoikov) quotes and a hard inventory limit. Live PnL is decomposed into **spread
-  capture** (edge vs fair value on each fill) and **inventory / adverse selection**
-  (mark-to-market of the position it's left holding); `total = spread + inventory`.
+- **Strategies** — three autonomous bots that trade the same live book, with live PnL:
+  a **market maker** (inventory-skewed Avellaneda–Stoikov quotes, PnL split into spread
+  capture vs adverse selection), a **momentum** bot (buys strength, sells weakness), and
+  a **mean-reversion** bot (fades moves back to the mean). Market-scenario presets (calm /
+  trending / choppy / volatile / flash crash) let you watch which style wins by regime —
+  momentum in trends, mean reversion in choppy markets. The bots trade only on the
+  observable mid, and the price process itself becomes mean-reverting in the choppy
+  regime, so the edge is real, not an oracle.
 
 ## Rebuild the WASM (only if the engine or bindings change)
 

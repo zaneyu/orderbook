@@ -190,7 +190,7 @@ function render(snap: any) {
   updateMarketState(snap);
   renderMine(snap);
   updateExec(snap);
-  updateMaker(snap);
+  updateStrats(snap);
 
   $("trades").textContent = fmtN(snap.trades);
   $("resting").textContent = fmtN(snap.resting);
@@ -500,6 +500,9 @@ function wireControls() {
     mineFilled.clear();
     lastMineHTML = "";
     lastTapeHTML = "";
+    hMm.length = hMom.length = hMr.length = 0; // reset also flattens the strategies
+    stratSampleT = 0;
+    document.querySelectorAll(".btn.sc").forEach((x) => x.classList.remove("on"));
   };
 
   $("bull").onclick = () => {
@@ -601,7 +604,7 @@ function wireTabs() {
     }
     for (const p of panels) p.hidden = p.dataset.panel !== name;
     activePanel = name;
-    if (name === "maker") sizeMm(); // canvas was zero-sized while its panel was hidden
+    if (name === "strats") sizeMm(); // canvas was zero-sized while its panel was hidden
   };
   tabs.forEach((t, i) => {
     t.addEventListener("click", () => select(t.dataset.tab!));
@@ -793,30 +796,63 @@ function wireExec() {
   $("execCancel").onclick = cancelExec;
 }
 
-// ---- market maker -----------------------------------------------------------
+// ---- strategies arena (market maker · momentum · mean reversion) ------------
 const MMHIST = 300;
-const mmHist: number[] = []; // PnL ($) over time
-let mmLastSampleT = 0;
+const STRAT_COLORS: Record<string, string> = { mm: "#f2b54a", mom: "#5fb0e0", mr: "#c58ae0" };
+const hMm: number[] = []; // each strategy's cumulative PnL ($) over wall-clock time
+const hMom: number[] = [];
+const hMr: number[] = [];
+let stratSampleT = 0;
 let mmSpark: HTMLCanvasElement;
 let mmCtx: CanvasRenderingContext2D | null = null;
-let mmOn = false;
 
-function wireMaker() {
-  const toggle = $("mmToggle");
-  toggle.onclick = () => {
-    mmOn = !mmOn;
-    sim.mmEnable(mmOn);
-    toggle.textContent = mmOn ? "stop quoting" : "start quoting";
-    toggle.setAttribute("aria-pressed", mmOn ? "true" : "false");
-  };
+function setPos(el: HTMLElement, v: number) {
+  el.textContent = fmtN(v);
+  el.className = "mono " + (v > 0 ? "pos" : v < 0 ? "neg" : "");
+}
+function setSig(el: HTMLElement, s: number) {
+  el.style.transform = `scaleX(${Math.min(1, Math.abs(s))})`;
+  el.className = s > 0.02 ? "pos" : s < -0.02 ? "neg" : "";
+}
+function toggleStrat(btn: HTMLElement, on: boolean) {
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.textContent = on ? "on" : "off";
+  btn.closest(".strat")?.classList.toggle("on", on);
+}
+
+function wireStrats() {
+  let mmOn = false,
+    momOn = false,
+    mrOn = false;
+  const mmBtn = $("mmToggle"),
+    momBtn = $("momToggle"),
+    mrBtn = $("mrToggle");
+  mmBtn.onclick = () => { mmOn = !mmOn; sim.mmEnable(mmOn); toggleStrat(mmBtn, mmOn); };
+  momBtn.onclick = () => { momOn = !momOn; sim.momEnable(momOn); toggleStrat(momBtn, momOn); };
+  mrBtn.onclick = () => { mrOn = !mrOn; sim.mrEnable(mrOn); toggleStrat(mrBtn, mrOn); };
+
   const cfg = () =>
     sim.mmConfig(readIntInput("mmHalf") ?? 1, readIntInput("mmSize") ?? 200, readIntInput("mmInv") ?? 2000);
   ["mmHalf", "mmSize", "mmInv"].forEach((id) => $(id).addEventListener("input", cfg));
   cfg();
-  $("mmFlat").onclick = () => {
+
+  document.querySelectorAll<HTMLElement>(".btn.sc").forEach((b) =>
+    b.addEventListener("click", () => {
+      sim.scenario(+(b.dataset.sc || 0));
+      document.querySelectorAll(".btn.sc").forEach((x) => {
+        x.classList.remove("on");
+        x.setAttribute("aria-pressed", "false");
+      });
+      b.classList.add("on");
+      b.setAttribute("aria-pressed", "true");
+    }),
+  );
+  $("stratFlat").onclick = () => {
     sim.mmFlatten();
-    mmHist.length = 0;
+    sim.stratFlatten();
+    hMm.length = hMom.length = hMr.length = 0;
   };
+
   mmSpark = $<HTMLCanvasElement>("mmChart");
   mmCtx = mmSpark.getContext("2d");
   sizeMm();
@@ -826,86 +862,88 @@ function sizeMm() {
   if (!mmCtx) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const r = mmSpark.getBoundingClientRect();
-  const w = Math.max(1, Math.round(r.width));
-  const h = Math.max(1, Math.round(r.height));
-  mmSpark.width = Math.round(w * dpr);
-  mmSpark.height = Math.round(h * dpr);
+  mmSpark.width = Math.max(1, Math.round(r.width * dpr));
+  mmSpark.height = Math.max(1, Math.round(r.height * dpr));
   mmCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
-function updateMaker(snap: any) {
-  const mm = snap.mm;
-  if (!mm) return;
-  const pnl = mm.pnlTick * TICK_SIZE;
-  setMoney($("mmPnl"), pnl);
-  setMoney($("mmReal"), mm.spreadTick * TICK_SIZE); // spread capture
-  setMoney($("mmUnreal"), mm.adverseTick * TICK_SIZE); // inventory / adverse selection
-  const inv = mm.inv as number;
-  const invEl = $("mmInvv");
-  invEl.textContent = fmtN(inv);
-  invEl.className = "mono " + (inv > 0 ? "pos" : inv < 0 ? "neg" : "");
-  $("mmQuotes").textContent = `${mm.bidPx >= 0 ? fmtP(mm.bidPx) : "—"} / ${mm.askPx >= 0 ? fmtP(mm.askPx) : "—"}`;
-  $("mmFills").textContent = fmtN(mm.fills);
-
-  const frac = mm.invLimit > 0 ? Math.max(-1, Math.min(1, inv / mm.invLimit)) : 0;
-  const fill = $("mmInvFill");
-  fill.classList.toggle("short", frac < 0);
-  fill.style.transform = `scaleX(${Math.abs(frac)})`;
-  fill.style.background = frac >= 0 ? "var(--bid)" : "var(--ask)";
+function updateStrats(snap: any) {
+  const mm = snap.mm,
+    st = snap.strat;
+  if (!mm || !st) return;
+  const mmPnl = mm.pnlTick * TICK_SIZE;
+  const momPnl = st.mom.pnlTick * TICK_SIZE;
+  const mrPnl = st.mr.pnlTick * TICK_SIZE;
+  setMoney($("mmPnl"), mmPnl);
+  setPos($("mmInvv"), mm.inv);
+  $("mmExtra").textContent =
+    `spread ${money(mm.spreadTick * TICK_SIZE)} · adverse ${money(mm.adverseTick * TICK_SIZE)} · ` +
+    `quotes ${mm.bidPx >= 0 ? fmtP(mm.bidPx) : "—"}/${mm.askPx >= 0 ? fmtP(mm.askPx) : "—"}`;
+  setMoney($("momPnl"), momPnl);
+  setPos($("momPos"), st.mom.inv);
+  setSig($("momSig"), st.mom.signal);
+  setMoney($("mrPnl"), mrPnl);
+  setPos($("mrPos"), st.mr.inv);
+  setSig($("mrSig"), st.mr.signal);
 
   const now = performance.now();
-  if (now - mmLastSampleT >= SAMPLE_MS) {
-    mmLastSampleT = now;
-    mmHist.push(pnl);
-    if (mmHist.length > MMHIST) mmHist.shift();
+  if (now - stratSampleT >= SAMPLE_MS) {
+    stratSampleT = now;
+    hMm.push(mmPnl);
+    hMom.push(momPnl);
+    hMr.push(mrPnl);
+    for (const h of [hMm, hMom, hMr]) if (h.length > MMHIST) h.shift();
   }
-  if (activePanel === "maker") drawMm();
+  if (activePanel === "strats") drawStrats(snap);
 }
-function drawMm() {
-  if (!mmCtx || mmHist.length < 2) return;
+function drawStrats(snap: any) {
+  if (!mmCtx) return;
   const c = mmCtx;
   const w = mmSpark.getBoundingClientRect().width;
   const h = mmSpark.getBoundingClientRect().height;
   c.clearRect(0, 0, w, h);
+  const series: [number[], string, boolean][] = [
+    [hMm, STRAT_COLORS.mm, snap.mm.on],
+    [hMom, STRAT_COLORS.mom, snap.strat.mom.on],
+    [hMr, STRAT_COLORS.mr, snap.strat.mr.on],
+  ];
+  // shared scale across the enabled series, always including 0
   let lo = 0,
     hi = 0;
-  for (const v of mmHist) {
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
-  }
+  for (const [hist, , on] of series) if (on) for (const v of hist) { if (v < lo) lo = v; if (v > hi) hi = v; }
   const pad = Math.max((hi - lo) * 0.12, 0.5);
   lo -= pad;
   hi += pad;
   const span = hi - lo || 1;
   const x = (i: number) => (i / (MMHIST - 1)) * w;
   const y = (v: number) => h - 3 - ((v - lo) / span) * (h - 6);
-  const n = mmHist.length;
-  const off = MMHIST - n;
-  // zero line
   c.strokeStyle = css("--line");
   c.lineWidth = 1;
   c.beginPath();
   c.moveTo(0, y(0));
   c.lineTo(w, y(0));
   c.stroke();
-  // pnl line, colored by sign of the latest value
-  const up = mmHist[n - 1] >= 0;
-  c.beginPath();
-  for (let i = 0; i < n; i++) {
-    const px = x(off + i);
-    const py = y(mmHist[i]);
-    i === 0 ? c.moveTo(px, py) : c.lineTo(px, py);
+  for (const [hist, color, on] of series) {
+    if (!on || hist.length < 2) continue;
+    const n = hist.length;
+    const off = MMHIST - n;
+    c.beginPath();
+    for (let i = 0; i < n; i++) {
+      const px = x(off + i);
+      const py = y(hist[i]);
+      i === 0 ? c.moveTo(px, py) : c.lineTo(px, py);
+    }
+    c.strokeStyle = color;
+    c.lineWidth = 1.6;
+    c.lineJoin = "round";
+    c.stroke();
   }
-  c.strokeStyle = up ? css("--bid") : css("--ask");
-  c.lineWidth = 1.5;
-  c.lineJoin = "round";
-  c.stroke();
 }
 
 boot()
   .then(() => {
     wireTabs();
     wireExec();
-    wireMaker();
+    wireStrats();
   })
   .catch((err) => {
     const b = document.getElementById("boot");

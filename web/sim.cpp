@@ -53,6 +53,48 @@ struct UserOrder {
     double notional = 0;  // sum of fill_price * fill_qty (tick units) -> average price
     bool done = false;
 };
+
+// Signed-position PnL accounting (avg-cost basis, realized on closed lots). Shared by the
+// autonomous strategies. All prices in ticks; realized in tick*shares. This is the same
+// accounting a strict reviewer verified for the market maker (add/flip/close all correct).
+struct Position {
+    long long inv = 0;      // signed shares (+ long, - short)
+    double avgcost = 0;     // avg cost of the current inventory (ticks)
+    double realized = 0;    // realized PnL on closed lots (tick*shares)
+    long long fills = 0;
+    long long volume = 0;
+
+    void apply(double px, long long q) {  // q > 0 bought, q < 0 sold
+        if ((inv > 0 && q < 0) || (inv < 0 && q > 0)) {  // reducing/closing
+            const long long closing = std::min(std::llabs(q), std::llabs(inv));
+            const double sign = inv > 0 ? 1.0 : -1.0;    // long: profit = px - avgcost
+            realized += sign * (px - avgcost) * static_cast<double>(closing);
+        }
+        const long long newInv = inv + q;
+        if (inv == 0 || (inv > 0 && q > 0) || (inv < 0 && q < 0)) {  // adding to the position
+            const double a = std::fabs(static_cast<double>(inv));
+            const double b = std::fabs(static_cast<double>(q));
+            if (a + b > 0) avgcost = (avgcost * a + px * b) / (a + b);
+        } else if ((inv > 0 && newInv < 0) || (inv < 0 && newInv > 0)) {  // flipped through zero
+            avgcost = px;
+        }
+        inv = newInv;
+        if (inv == 0) avgcost = 0;
+        ++fills;
+        volume += std::llabs(q);
+    }
+    double mtm(double mid) const { return realized + static_cast<double>(inv) * (mid - avgcost); }
+    void reset() { inv = 0; avgcost = 0; realized = 0; fills = 0; volume = 0; }
+};
+
+constexpr int kStratClip = 120;         // shares per strategy trade
+constexpr long long kStratPos = 1500;   // strategy position limit (shares)
+constexpr double kStratInterval = 5.0;  // frame-equivalents of wall-clock between trades
+constexpr double kMomFast = 0.09;      // momentum fast-EMA alpha (per frame)
+constexpr double kMomSlow = 0.012;     // momentum slow-EMA alpha
+constexpr double kMomGain = 220.0;     // signal (ticks) -> target shares
+constexpr double kMrAlpha = 0.02;      // mean-reversion mean-EMA alpha
+constexpr double kMrGain = 260.0;      // deviation (ticks) -> target shares
 }  // namespace
 
 class Sim {
@@ -64,6 +106,7 @@ public:
         logvol_mean_ = std::log(1.4);  // calm, until the UI sets turbulence
         logvol_ = logvol_mean_;
         vol_ = std::exp(logvol_);
+        mom_fast_ = mom_slow_ = mr_ema_ = anchor_ = start;
         seed();
     }
 
@@ -85,6 +128,10 @@ public:
         mm_bid_id_ = mm_ask_id_ = 0;
         mm_bid_px_ = mm_ask_px_ = -1;
         mmFlatten();
+        stratFlatten();
+        mom_fast_ = mom_slow_ = mr_ema_ = anchor_ = start_;
+        mom_acc_ = mr_acc_ = 0;
+        mr_k_ = 0.0;
         seed();
     }
 
@@ -177,12 +224,20 @@ public:
         mm_volume_ = 0;
     }
 
+    void momEnable(bool on) { mom_on_ = on; mom_acc_ = 0; }  // full interval before the first trade
+    void mrEnable(bool on) { mr_on_ = on; mr_acc_ = 0; }
+    void stratFlatten() {  // reset the momentum & mean-reversion book-keeping (PnL to flat)
+        mom_pos_.reset();
+        mr_pos_.reset();
+    }
+
     // One render frame: advance the price by dt (in 60fps-frame units of wall-clock
     // time), then run n order events around it. dt sets price velocity (refresh-rate
     // independent); n only sets activity.
     void step(int n, double dt) {
         evolve_price(dt);
-        mm_requote();  // refresh the maker's two-sided quotes before this frame's flow
+        mm_requote();       // maker refreshes its two-sided quotes
+        run_strategies(dt); // momentum / mean-reversion take liquidity on their signal
         for (int i = 0; i < n; ++i) one_step();
     }
 
@@ -201,6 +256,24 @@ public:
     void setTurbulence(double x) {
         x = clampd(x, 0.0, 1.0);
         logvol_mean_ = std::log(0.6 + x * 7.4);  // calm ~0.6  ->  turbulent ~8 ticks/frame
+    }
+
+    // Preset market regimes so the strategies can be seen to win/lose by condition.
+    void scenario(int id) {
+        switch (id) {
+            case 0:  // calm
+                setTurbulence(0.08); drift_ = 0; mr_k_ = 0; break;
+            case 1:  // trending (up)
+                setTurbulence(0.20); drift_ = 0.7; mr_k_ = 0; break;
+            case 2:  // choppy / mean-reverting
+                setTurbulence(0.26); drift_ = 0; anchor_ = fv_; mr_k_ = 0.045; break;
+            case 3:  // volatile
+                setTurbulence(0.72); drift_ = 0; mr_k_ = 0; break;
+            case 4:  // flash crash
+                fv_ -= 110; drift_ = -1.0; mr_k_ = 0;
+                logvol_ = std::log(kVolCeil); clamp_fv(); break;
+            default: break;
+        }
     }
 
     // Full view for one render frame: L2 ladder + stats + tape + market state.
@@ -271,6 +344,25 @@ public:
         mm.set("fills", static_cast<double>(mm_fills_));
         mm.set("volume", static_cast<double>(mm_volume_));
         o.set("mm", mm);
+
+        // autonomous strategy state (momentum, mean-reversion) for the strategies arena
+        val strat = val::object();
+        val mom = val::object();
+        mom.set("on", mom_on_);
+        mom.set("pnlTick", mom_pos_.mtm(mid));
+        mom.set("inv", static_cast<double>(mom_pos_.inv));
+        mom.set("fills", static_cast<double>(mom_pos_.fills));
+        mom.set("signal", clampd((mom_fast_ - mom_slow_) / 6.0, -1.0, 1.0));
+        strat.set("mom", mom);
+        val mr = val::object();
+        mr.set("on", mr_on_);
+        mr.set("pnlTick", mr_pos_.mtm(mid));
+        mr.set("inv", static_cast<double>(mr_pos_.inv));
+        mr.set("fills", static_cast<double>(mr_pos_.fills));
+        // report the bot's STANCE (negated deviation) so, like momentum, positive => wants long
+        mr.set("signal", clampd(-(strat_mid() - mr_ema_) / 6.0, -1.0, 1.0));
+        strat.set("mr", mr);
+        o.set("strat", strat);
         return o;
     }
 
@@ -340,7 +432,10 @@ private:
             logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.5);
         }
 
-        fv_ += drift_ * dt + vol_ * sdt * nd_(rng_);
+        // Drift + (optional) level mean-reversion toward an anchor + diffusion. mr_k_ is 0
+        // by default (a trending random walk); the "choppy" scenario turns it on so the
+        // price genuinely reverts — which is what gives a mean-reversion strategy an edge.
+        fv_ += (drift_ - mr_k_ * (fv_ - anchor_)) * dt + vol_ * sdt * nd_(rng_);
         clamp_fv();
     }
 
@@ -456,6 +551,67 @@ private:
         mm_volume_ += std::llabs(q);
     }
 
+    // ---- autonomous taker strategies (momentum, mean-reversion) ------------
+    double strat_mid() const {
+        if (book_.has_bid() && book_.has_ask())
+            return (book_.best_bid() + book_.best_ask()) / 2.0;
+        return fv_;
+    }
+
+    // Move `pos` toward a target position by taking a clip of liquidity (a market order).
+    // A deadband avoids churn. Returns true if it traded.
+    bool strat_trade(Position& pos, double target) {
+        const long long diff = static_cast<long long>(std::llround(target)) - pos.inv;
+        if (std::llabs(diff) < kStratClip / 2) return false;
+        const long long q = std::max<long long>(-kStratClip, std::min<long long>(kStratClip, diff));
+        if (q == 0) return false;
+        const bool buy = q > 0;
+        fills_.clear();
+        const OrderId id = next_id_++;
+        book_.add_market(id, buy ? Side::Buy : Side::Sell, static_cast<Qty>(std::llabs(q)), fills_);
+        long long got = 0;
+        for (const auto& f : fills_) {
+            pos.apply(static_cast<double>(f.price), buy ? static_cast<long long>(f.qty) : -static_cast<long long>(f.qty));
+            got += f.qty;
+        }
+        record();  // update tape/trades + attribute the maker/user side, at the pre-impact fair
+        if (got > 0) {  // then move fair value — strategy flow exerts market impact like any aggressor
+            fv_ += (buy ? 1.0 : -1.0) * kImpact * got;
+            clamp_fv();
+        }
+        return true;
+    }
+
+    void run_strategies(double dt) {
+        // Advance the EMAs every frame (even when the bots are off) so they never freeze
+        // stale and snap on re-enable. Signals/EMAs are dt-scaled -> refresh-independent.
+        const double mid = strat_mid();
+        mom_fast_ += (mid - mom_fast_) * std::min(1.0, kMomFast * dt);
+        mom_slow_ += (mid - mom_slow_) * std::min(1.0, kMomSlow * dt);
+        mr_ema_ += (mid - mr_ema_) * std::min(1.0, kMrAlpha * dt);
+
+        // Trade on a WALL-CLOCK cadence (accumulated dt), not per render frame, so turnover
+        // and impact are identical at 60 or 240 Hz — the same invariant as the price process.
+        if (mom_on_) {
+            mom_acc_ += dt;
+            if (mom_acc_ >= kStratInterval) {
+                mom_acc_ = 0;
+                const double signal = mom_fast_ - mom_slow_;  // buy strength / sell weakness
+                const double target = clampd(signal * kMomGain, -static_cast<double>(kStratPos), static_cast<double>(kStratPos));
+                strat_trade(mom_pos_, target);
+            }
+        }
+        if (mr_on_) {
+            mr_acc_ += dt;
+            if (mr_acc_ >= kStratInterval) {
+                mr_acc_ = 0;
+                const double dev = mid - mr_ema_;  // fade deviations from the running mean
+                const double target = clampd(-dev * kMrGain, -static_cast<double>(kStratPos), static_cast<double>(kStratPos));
+                strat_trade(mr_pos_, target);
+            }
+        }
+    }
+
     void seed() {
         for (int i = 0; i < 400; ++i) one_step();
     }
@@ -494,6 +650,20 @@ private:
     double mm_spread_ = 0;          // cumulative spread capture vs fair (ticks*shares)
     long long mm_fills_ = 0;
     long long mm_volume_ = 0;
+
+    // autonomous taker strategies
+    bool mom_on_ = false;
+    Position mom_pos_;
+    double mom_acc_ = 0;                   // wall-clock (frame-equiv) since last trade
+    double mom_fast_ = 0, mom_slow_ = 0;   // fast/slow EMAs of the mid (ticks)
+    bool mr_on_ = false;
+    Position mr_pos_;
+    double mr_acc_ = 0;
+    double mr_ema_ = 0;                    // running-mean EMA of the mid (ticks)
+
+    // scenario-driven level mean-reversion of the price
+    double mr_k_ = 0.0;   // reversion strength (0 => trending random walk)
+    double anchor_ = 0.0; // level the price reverts toward when mr_k_ > 0
 };
 
 EMSCRIPTEN_BINDINGS(orderbook) {
@@ -508,5 +678,9 @@ EMSCRIPTEN_BINDINGS(orderbook) {
         .function("mmEnable", &Sim::mmEnable)
         .function("mmConfig", &Sim::mmConfig)
         .function("mmFlatten", &Sim::mmFlatten)
+        .function("momEnable", &Sim::momEnable)
+        .function("mrEnable", &Sim::mrEnable)
+        .function("stratFlatten", &Sim::stratFlatten)
+        .function("scenario", &Sim::scenario)
         .function("snapshot", &Sim::snapshot);
 }
