@@ -28,15 +28,15 @@ constexpr std::size_t RESERVE = 1u << 16;  // pool/id-map capacity (live orders 
 // Units are ticks (1 tick = $0.01), rates per frame-equivalent. Calibrated for a ~$100
 // instrument: lively but realistic (tens of cents/sec, trends lasting several seconds).
 constexpr double kKappaVol = 0.02;    // mean-reversion speed of log-volatility
-constexpr double kSigmaVol = 0.13;    // vol-of-vol -> volatility *clusters*
-constexpr double kKappaDrift = 0.006; // mean-reversion of momentum (trends persist ~seconds)
-constexpr double kSigmaDrift = 0.07;  // momentum innovation (ticks/frame)
-constexpr double kDriftClamp = 2.5;   // cap on drift (ticks/frame ~= $0.025 -> ~$1.5/s)
-constexpr double kFlowScale = 0.9;    // how sharply aggressive flow leans with drift
-constexpr double kImpact = 0.05;      // permanent market impact per filled unit (ticks)
-constexpr double kVolFloor = 0.3;     // ticks/frame
-constexpr double kVolCeil = 25.0;
-constexpr double kJumpPerFrame = 1.0 / 600.0;  // spontaneous-news hazard per frame (~1 / 10s)
+constexpr double kSigmaVol = 0.11;    // vol-of-vol -> volatility *clusters*
+constexpr double kKappaDrift = 0.005; // mean-reversion of momentum (trends persist ~seconds)
+constexpr double kSigmaDrift = 0.025; // momentum innovation (ticks/frame)
+constexpr double kDriftClamp = 1.0;   // cap on drift (ticks/frame ~= $0.01 -> ~$0.6/s extreme)
+constexpr double kFlowScale = 0.5;    // how sharply aggressive flow leans with drift
+constexpr double kImpact = 0.015;     // permanent market impact per filled unit (ticks)
+constexpr double kVolFloor = 0.25;    // ticks/frame
+constexpr double kVolCeil = 20.0;
+constexpr double kJumpPerFrame = 1.0 / 1500.0;  // spontaneous-news hazard per frame (~1 / 25s)
 
 double clampd(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
@@ -60,7 +60,7 @@ public:
     Sim(int ticks, int start)
         : ticks_(ticks), book_(ticks, RESERVE), rng_(0x9E3779B9ull),
           start_(start), fv_(start) {
-        logvol_mean_ = std::log(2.5);  // until the UI sets turbulence
+        logvol_mean_ = std::log(1.4);  // calm, until the UI sets turbulence
         logvol_ = logvol_mean_;
         vol_ = std::exp(logvol_);
         seed();
@@ -137,17 +137,17 @@ public:
     // dir = +1 bullish, -1 bearish.
     void news(int dir) {
         const double d = dir >= 0 ? 1.0 : -1.0;
-        const double jump = d * (40.0 + std::abs(nd_(rng_)) * 40.0);  // ~$0.40–$1.20
+        const double jump = d * (30.0 + std::abs(nd_(rng_)) * 30.0);  // ~$0.30–$0.90
         fv_ += jump;
-        drift_ += d * 1.5;                    // ignites a trend that mean-reverts away
-        logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.6);  // volatility jumps on news
+        drift_ += d * 0.8;                    // ignites a trend that mean-reverts away
+        logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.5);  // volatility jumps on news
         clamp_fv();
     }
 
     // Set the ambient turbulence, x in [0,1]: raises the mean of log-volatility.
     void setTurbulence(double x) {
         x = clampd(x, 0.0, 1.0);
-        logvol_mean_ = std::log(1.0 + x * 9.0);  // calm ~1  ->  turbulent ~10 ticks/frame
+        logvol_mean_ = std::log(0.6 + x * 7.4);  // calm ~0.6  ->  turbulent ~8 ticks/frame
     }
 
     // Full view for one render frame: L2 ladder + stats + tape + market state.
@@ -170,8 +170,8 @@ public:
         else
             mid = fv_;
         o.set("midTick", mid);
-        o.set("vol01", clampd((vol_ - 1.0) / 9.0, 0.0, 1.0));
-        o.set("trend", clampd(drift_ / 2.0, -1.0, 1.0));
+        o.set("vol01", clampd((vol_ - 0.5) / 6.0, 0.0, 1.0));
+        o.set("trend", clampd(drift_ / 0.8, -1.0, 1.0));
 
         val t = val::array();
         int i = 0;
@@ -251,11 +251,11 @@ private:
         drift_ += -kKappaDrift * drift_ * dt + kSigmaDrift * sdt * nd_(rng_);
         drift_ = clampd(drift_, -kDriftClamp, kDriftClamp);
 
-        if (u01() < kJumpPerFrame * dt) {  // spontaneous news (Poisson), ~ every 10s
-            const double j = nd_(rng_) * 25.0;
+        if (u01() < kJumpPerFrame * dt) {  // spontaneous news (Poisson), ~ every 25s
+            const double j = nd_(rng_) * 18.0;
             fv_ += j;
-            drift_ += (j > 0 ? 1.0 : -1.0) * 1.5;
-            logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.6);
+            drift_ += (j > 0 ? 1.0 : -1.0) * 0.8;
+            logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.5);
         }
 
         fv_ += drift_ * dt + vol_ * sdt * nd_(rng_);
@@ -270,16 +270,18 @@ private:
         const OrderId id = next_id_++;
         const int roll = static_cast<int>(rng_() % 100);
 
-        if (roll < 46) {  // provide depth: a resting limit near the touch; spread widens with vol
+        // Realistic mix: mostly passive quoting and cancels, few marketable orders
+        // (a high order-to-trade ratio, like a real book).
+        if (roll < 55) {  // provide depth: a resting limit near the touch; spread widens with vol
             const bool buy = u01() < 0.5;
-            const Price base = static_cast<Price>(1 + std::llround(vol_ / 3.0));  // 1..~7 ticks off
+            const Price base = static_cast<Price>(1 + std::llround(vol_ / 4.0));  // ~1..6 ticks off
             const Price off = base + static_cast<Price>(rng_() % 3);
             const Price px = buy ? mid - off : mid + off;
-            const Qty q = lot(10.0);
+            const Qty q = lot(35.0);
             if (book_.add_limit(id, buy ? Side::Buy : Side::Sell, px, q, fills_) > 0) live_.push_back(id);
-        } else if (roll < 72) {  // take liquidity: a marketable order prints a trade
+        } else if (roll < 70) {  // take liquidity: a marketable order prints a trade
             const bool buy = u01() < p_aggr_buy;
-            book_.add_market(id, buy ? Side::Buy : Side::Sell, lot(6.0), fills_);
+            book_.add_market(id, buy ? Side::Buy : Side::Sell, lot(25.0), fills_);
         } else if (!live_.empty()) {  // churn: cancel a random resting order
             const std::size_t k = rng_() % live_.size();
             book_.cancel(live_[k]);
@@ -296,7 +298,7 @@ private:
     // A lognormal-ish lot size with the given median; clamped to a sane range.
     Qty lot(double median) {
         const double v = median * std::exp(nd_(rng_) * 0.7);
-        return static_cast<Qty>(clampd(std::llround(v), 1.0, 60.0));
+        return static_cast<Qty>(clampd(std::llround(v), 1.0, 400.0));
     }
 
     void seed() {

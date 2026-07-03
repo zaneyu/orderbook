@@ -230,7 +230,9 @@ function renderMine(snap: any) {
 }
 
 // ---- market state: regime badge, volatility meter, live price chart ---------
-const HIST = 260;
+const HIST = 300; // samples held
+const SAMPLE_MS = 120; // wall-clock spacing between chart samples (~36s window)
+let lastSampleT = 0;
 const hist: number[] = []; // recent mid, in price
 let spark: HTMLCanvasElement;
 let sctx: CanvasRenderingContext2D;
@@ -253,7 +255,9 @@ function css(name: string) {
 
 function updateMarketState(snap: any) {
   const mid = toPrice(snap.midTick);
-  if (mid !== null) {
+  const now = performance.now();
+  if (mid !== null && now - lastSampleT >= SAMPLE_MS) {
+    lastSampleT = now;
     hist.push(mid);
     if (hist.length > HIST) hist.shift();
   }
@@ -262,17 +266,17 @@ function updateMarketState(snap: any) {
   const vol01 = snap.vol01 as number; // 0..1
   const reg = $("regime");
   let label: string, cls: string;
-  if (trend > 0.18) {
+  if (trend > 0.3) {
     label = "trending up";
     cls = "up";
-  } else if (trend < -0.18) {
+  } else if (trend < -0.3) {
     label = "trending down";
     cls = "down";
   } else {
     label = "ranging";
     cls = "flat";
   }
-  if (vol01 > 0.62) label += " · volatile";
+  if (vol01 > 0.6) label += " · volatile";
   reg.textContent = label;
   reg.className = cls;
 
@@ -301,7 +305,7 @@ function drawSpark(trend: number) {
   const n = hist.length;
   const off = HIST - n; // right-align the newest sample
 
-  const line = trend > 0.18 ? css("--bid") : trend < -0.18 ? css("--ask") : css("--amber");
+  const line = trend > 0.3 ? css("--bid") : trend < -0.3 ? css("--ask") : css("--amber");
 
   // faint area fill under the line
   sctx.beginPath();
