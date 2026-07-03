@@ -221,6 +221,17 @@ TEST(modify_reprice_can_cross) {
     CHECK(!b.has_ask());
 }
 
+TEST(modify_to_out_of_range_price_is_rejected_and_preserves_order) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 100, 5, fills);
+    // An out-of-range target price must NOT destroy the resting order.
+    CHECK(!b.modify(1, TICKS, 5, fills));         // >= num_ticks -> rejected
+    CHECK(!b.modify(1, -1, 5, fills));            // negative -> rejected
+    CHECK_EQ(b.qty_at(Side::Buy, 100), Qty{5});   // order still resting, unchanged
+    CHECK(b.cancel(1));                            // and still cancellable by id
+}
+
 // ------------------------------------------------------------ differential fuzz
 
 namespace {

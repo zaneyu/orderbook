@@ -12,3 +12,9 @@ a.out
 .vscode/
 .idea/
 compile_commands.json
+
+# compiled test binaries (Makefile emits to repo root)
+/test_orderbook
+/test_occupancy
+/test_flat_id_map
+/test_alloc_audit

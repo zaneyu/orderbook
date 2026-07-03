@@ -147,9 +147,9 @@ Deliberately focused: single-threaded, single-symbol, integer tick prices, limit
 market orders with price-time priority. Accessors expose sentinels on an empty book
 (`best_bid() == -1`, `best_ask() == num_ticks()`), valid only when `has_bid()/has_ask()`.
 `Qty` is 32-bit and level totals are not saturated — fine within the intended range.
-Natural extensions (not included): stop/pegged orders, per-symbol sharding, a lock-free
-SPSC ingress, and L2/L3 snapshot streaming. The engine is the core; those are layers on
-top of it.
+Natural extensions (not included): stop/pegged orders, self-trade prevention, price
+bands / limit-up-limit-down, per-symbol sharding, a lock-free SPSC ingress, and L2/L3
+snapshot streaming. The engine is the core; those are layers on top of it.
 
 ## License
 

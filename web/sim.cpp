@@ -21,6 +21,7 @@ using emscripten::val;
 
 namespace {
 constexpr std::size_t RESERVE = 1u << 16;  // pool/id-map capacity (live orders capped well below)
+constexpr int kMaxQty = 1'000'000;         // hard cap on a single order (keeps level totals << 2^32)
 
 // The price process is advanced by WALL-CLOCK time (a `dt` in 60fps-frame units), not
 // per render frame or per order event — so price velocity is identical at any refresh
@@ -68,6 +69,8 @@ public:
 
     void reset() {
         book_ = OrderBook(ticks_, RESERVE);
+        rng_.seed(0x9E3779B9ull);  // reproducible: reset yields the same market each time
+        nd_.reset();
         live_.clear();
         mine_.clear();
         tape_.clear();
@@ -83,6 +86,20 @@ public:
 
     // Manual order. type: 0 limit, 1 market, 2 ioc, 3 fok. side: 0 buy, 1 sell.
     val submit(int type, int side, int price, int qty) {
+        // Enforce the order contract HERE, not in the UI: reject non-positive size,
+        // cap the top, and keep price in the tick domain. A hostile/buggy caller must
+        // not be able to wrap Qty (uint32) or overflow a level total.
+        if (qty <= 0) {
+            val r = val::object();
+            r.set("filled", 0);
+            r.set("resting", 0);
+            r.set("rejected", true);
+            return r;
+        }
+        if (qty > kMaxQty) qty = kMaxQty;
+        if (price < 0) price = 0;
+        if (price >= ticks_) price = ticks_ - 1;
+
         fills_.clear();
         const Side s = side == 0 ? Side::Buy : Side::Sell;
         const OrderId id = next_id_++;
@@ -187,6 +204,7 @@ public:
         val mine = val::array();
         for (const auto& u : mine_) {
             val e = val::object();
+            e.set("id", static_cast<double>(u.id));
             e.set("side", u.side == Side::Buy ? 0 : 1);
             e.set("price", static_cast<int>(u.price));
             e.set("orig", u.orig);
@@ -288,9 +306,10 @@ private:
             live_[k] = live_.back();
             live_.pop_back();
         }
-        if (live_.size() > 4000) {  // keep the book bounded
+        if (live_.size() > 4000) {  // keep the book bounded (O(1) swap-pop, not erase(begin))
             book_.cancel(live_.front());
-            live_.erase(live_.begin());
+            live_.front() = live_.back();
+            live_.pop_back();
         }
         record();
     }

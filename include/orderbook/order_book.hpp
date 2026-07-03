@@ -101,9 +101,15 @@ public:
             return true;
         }
         const Side side = n.side;
+        if (new_qty == 0) {  // documented: new_qty == 0 cancels
+            cancel(id);
+            return true;
+        }
+        // An out-of-range target price is an invalid modify: leave the resting order
+        // untouched and report failure — never cancel it and silently drop it.
+        if (new_price < 0 || new_price >= num_ticks_) return false;
         cancel(id);
-        if (new_qty > 0 && new_price >= 0 && new_price < num_ticks_)
-            add_limit(id, side, new_price, new_qty, out);
+        add_limit(id, side, new_price, new_qty, out);
         return true;
     }
 

@@ -43,6 +43,7 @@ function buildRows(host: HTMLElement, side: "ask" | "bid"): Row[] {
   for (let i = 0; i < DEPTH; i++) {
     const el = document.createElement("div");
     el.className = `lrow ${side} empty`;
+    el.setAttribute("role", "button"); // keyboard-operable: focus + Enter/Space places an order
     const p = document.createElement("span");
     p.className = "lp";
     const z = document.createElement("span");
@@ -64,6 +65,8 @@ function paint(row: Row, level: [number, number] | null, idx: number, max: numbe
     row.tick = -1;
     if (!row.el.classList.contains("empty")) {
       row.el.classList.add("empty");
+      row.el.removeAttribute("tabindex"); // empty levels aren't focusable/actionable
+      row.el.removeAttribute("aria-label");
       row.p.textContent = "";
       row.z.textContent = "";
       row.bar.style.transform = "scaleX(0)";
@@ -74,6 +77,11 @@ function paint(row: Row, level: [number, number] | null, idx: number, max: numbe
   const [tick, qty] = level;
   row.tick = tick;
   row.el.classList.remove("empty");
+  row.el.tabIndex = 0;
+  row.el.setAttribute(
+    "aria-label",
+    `${row.side === "bid" ? "bid" : "ask"} ${fmtP(tick)}, size ${fmtN(qty)}, ${row.side === "bid" ? "buy" : "sell"} here`,
+  );
   row.p.textContent = fmtP(tick);
   row.z.textContent = fmtN(qty);
   row.bar.style.transform = `scaleX(${Math.max(0.02, qty / max)})`;
@@ -90,6 +98,7 @@ let sim: any;
 let running = true;
 let speed = 250;
 let prevLast = -1;
+let lastTapeHTML = "";
 let stepAccum = 0;
 let rateT = performance.now();
 let reduceMotion = false;
@@ -113,7 +122,9 @@ async function boot() {
 
   $("boot").remove();
   $("app").hidden = false;
-  reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+  reduceMotion = mq.matches;
+  mq.addEventListener("change", (e) => (reduceMotion = e.matches));
 
   let lastFrame = performance.now();
   const frame = () => {
@@ -170,7 +181,10 @@ function render(snap: any) {
     const dir = older ? (t.price > older.price ? "up" : t.price < older.price ? "down" : "") : "";
     html += `<div class="trow ${dir}"><span class="tp">${fmtP(t.price)}</span><span class="tz">${fmtN(t.qty)}</span></div>`;
   }
-  $("tape").innerHTML = html;
+  if (html !== lastTapeHTML) {
+    $("tape").innerHTML = html; // only reparse when the tape actually changed
+    lastTapeHTML = html;
+  }
 
   updateMarketState(snap);
   renderMine(snap);
@@ -188,8 +202,9 @@ function render(snap: any) {
 }
 
 // ---- your working orders: track each user limit order over its life ---------
-type Mine = { side: number; price: number; orig: number; filled: number; avgTick: number; done: boolean };
-const mineFilled = new Map<string, number>(); // key -> last filled, to flash on a new fill
+type Mine = { id: number; side: number; price: number; orig: number; filled: number; avgTick: number; done: boolean };
+const mineFilled = new Map<number, number>(); // order id -> last filled, to flash on a new fill
+let lastMineHTML = "";
 
 function renderMine(snap: any) {
   const mine: Mine[] = snap.mine || [];
@@ -201,19 +216,18 @@ function renderMine(snap: any) {
   box.hidden = false;
   const mid = toPrice(snap.midTick);
   let html = "";
-  const seen = new Set<string>();
-  for (let i = 0; i < mine.length; i++) {
-    const o = mine[i];
-    const key = `${o.side}:${o.price}:${o.orig}:${i}`;
-    seen.add(key);
+  const seen = new Set<number>();
+  for (const o of mine) {
+    seen.add(o.id);
     const dir = o.side === 0 ? 1 : -1;
     const avg = o.avgTick >= 0 ? toPrice(o.avgTick) : null;
-    const pnl = avg !== null && mid !== null && o.filled > 0 ? (mid - avg) * o.filled * dir : null;
-    const pcls = pnl === null ? "" : pnl > 0.0005 ? "up" : pnl < -0.0005 ? "down" : "";
+    let pnl = avg !== null && mid !== null && o.filled > 0 ? (mid - avg) * o.filled * dir : null;
+    if (pnl !== null && Math.abs(pnl) < 0.005) pnl = 0; // avoid a red "-0.00"
+    const pcls = pnl === null ? "" : pnl > 0 ? "up" : pnl < 0 ? "down" : "";
     const pct = Math.round((o.filled / o.orig) * 100);
     const status = o.done ? "filled" : o.filled > 0 ? `${pct}% working` : "resting";
-    const flash = mineFilled.has(key) && (mineFilled.get(key) as number) < o.filled ? " hit" : "";
-    mineFilled.set(key, o.filled);
+    const flash = mineFilled.has(o.id) && (mineFilled.get(o.id) as number) < o.filled ? " hit" : "";
+    mineFilled.set(o.id, o.filled);
     html +=
       `<div class="mo ${o.side === 0 ? "buy" : "sell"}${o.done ? " done" : ""}${flash}">` +
       `<span class="mo-side">${o.side === 0 ? "BUY" : "SELL"}</span>` +
@@ -226,7 +240,11 @@ function renderMine(snap: any) {
       `</div>`;
   }
   for (const k of mineFilled.keys()) if (!seen.has(k)) mineFilled.delete(k);
-  $("molist").innerHTML = html;
+  if (html !== lastMineHTML) {
+    // only touch the DOM when it changed (preserves selection, avoids reparse churn)
+    $("molist").innerHTML = html;
+    lastMineHTML = html;
+  }
 }
 
 // ---- market state: regime badge, volatility meter, live price chart ---------
@@ -281,7 +299,8 @@ function updateMarketState(snap: any) {
   reg.className = cls;
 
   $("volfill").style.transform = `scaleX(${Math.max(0.02, vol01)})`;
-  $("volfill").className = vol01 > 0.62 ? "hot" : "";
+  $("volfill").className = vol01 > 0.6 ? "hot" : "";
+  $("volmeter").setAttribute("aria-valuenow", String(Math.round(vol01 * 100)));
 
   drawSpark(trend);
 }
@@ -339,6 +358,34 @@ function drawSpark(trend: number) {
   sctx.fill();
 }
 
+// ---- input parsing (validated; never silently coerce to a crossing price) ---
+const MAX_QTY = 1_000_000;
+function readQty(): number | null {
+  const raw = $<HTMLInputElement>("qty").value.trim();
+  const n = parseInt(raw, 10);
+  if (!raw || !Number.isFinite(n) || n <= 0) return null;
+  return Math.min(n, MAX_QTY);
+}
+function readPrice(): number | null {
+  const raw = $<HTMLInputElement>("price").value.trim();
+  const n = Number(raw); // Number('') === 0 and Number('abc') === NaN, both rejected below
+  if (!raw || !Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+const ORDER_NAMES = ["limit", "market", "IOC", "FOK"];
+// Only limit orders rest; market/IOC/FOK never do — their remainder is cancelled/killed.
+function fillSummary(type: number, sideN: number, qty: number, at: string, res: any): string {
+  const w = sideN ? "sell" : "buy";
+  const filled = fmtN(res.filled);
+  if (type === 0) return `limit ${w} ${fmtN(qty)}${at} → filled ${filled}, resting ${fmtN(res.resting)}`;
+  const head = `${ORDER_NAMES[type]} ${w} ${fmtN(qty)}${at} → filled ${filled}`;
+  if (res.resting > 0)
+    return type === 3
+      ? `${head} → killed, ${fmtN(res.resting)} unfilled (all-or-nothing)`
+      : `${head}, ${fmtN(res.resting)} unfilled (cancelled)`;
+  return head;
+}
+
 // ---- direct ladder interaction ---------------------------------------------
 let hoverSide: "ask" | "bid" | null = null;
 let hoverIdx = -1;
@@ -358,6 +405,22 @@ function wireLadder() {
       const el = (e.target as HTMLElement).closest(".lrow") as any;
       const r: Row | undefined = el?._row;
       if (!r || r.tick < 0) return;
+      placeAt(r);
+    });
+    // keyboard: focusing a level shows its cumulative depth; Enter/Space places the order
+    host.addEventListener("focusin", (e) => {
+      const r: Row | undefined = (e.target as any)?._row;
+      if (!r || r.tick < 0) return;
+      hoverSide = r.side;
+      hoverIdx = r.idx;
+      refreshCum();
+    });
+    host.addEventListener("focusout", clearCum);
+    host.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " " && e.code !== "Space") return;
+      const r: Row | undefined = (e.target as any)?._row;
+      if (!r || r.tick < 0) return;
+      e.preventDefault();
       placeAt(r);
     });
   }
@@ -387,14 +450,18 @@ function clearCum() {
 }
 
 function placeAt(r: Row) {
-  const qty = Math.max(1, parseInt($<HTMLInputElement>("qty").value) || 0);
-  const s = r.side === "bid" ? 0 : 1; // click the bid side to buy, the ask side to sell
+  const qty = readQty();
+  if (qty === null) return showFill("enter a valid quantity");
+  const s = r.side === "bid" ? 0 : 1; // the bid side buys, the ask side sells
   setSide(s);
   const res = sim.submit(0, s, r.tick, qty);
-  showFill(`limit ${s ? "sell" : "buy"} ${qty} @ ${fmtP(r.tick)} → filled ${res.filled}, resting ${res.resting}`);
-  r.el.classList.remove("flash");
-  void r.el.offsetWidth;
-  r.el.classList.add("flash");
+  if (res.rejected) return showFill("order rejected");
+  showFill(fillSummary(0, s, qty, ` @ ${fmtP(r.tick)}`, res));
+  if (!reduceMotion) {
+    r.el.classList.remove("flash");
+    void r.el.offsetWidth;
+    r.el.classList.add("flash");
+  }
 }
 
 // ---- form controls ----------------------------------------------------------
@@ -402,7 +469,11 @@ function setSide(v: number) {
   side = v;
   $("sideSeg")
     .querySelectorAll("button")
-    .forEach((b) => b.classList.toggle("on", +(b.dataset.v || 0) === v));
+    .forEach((b) => {
+      const on = +(b.dataset.v || 0) === v;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
 }
 function showFill(msg: string) {
   const el = $("fillmsg");
@@ -424,6 +495,8 @@ function wireControls() {
     prevLast = -1;
     hist.length = 0;
     mineFilled.clear();
+    lastMineHTML = "";
+    lastTapeHTML = "";
   };
 
   $("bull").onclick = () => {
@@ -463,23 +536,33 @@ function wireControls() {
   $<HTMLFormElement>("order").onsubmit = (e) => {
     e.preventDefault();
     const type = +typeEl.value;
-    const qty = Math.max(1, parseInt($<HTMLInputElement>("qty").value) || 0);
-    const typed = parseFloat(priceEl.value) || 100;
-    const tick = toTick(typed);
-    const eff = toPrice(tick); // what the book actually used, after clamping to a valid tick
+    const qty = readQty();
+    if (qty === null) return showFill("enter a valid quantity");
+
+    let tick = START_TICK; // market ignores price; any valid tick is fine
+    let at = "";
+    let clamped = "";
+    if (type !== 1) {
+      const typed = readPrice();
+      if (typed === null) return showFill("enter a valid price"); // never default to a crossing price
+      tick = toTick(typed);
+      const eff = toPrice(tick);
+      at = ` @ ${fmtP(tick)}`;
+      clamped = eff !== null && Math.abs(eff - typed) > 0.005 ? ` (clamped from ${typed.toFixed(2)})` : "";
+    }
     const res = sim.submit(type, side, tick, qty);
-    const names = ["limit", "market", "IOC", "FOK"];
-    const at = type === 1 ? "" : ` @ ${fmtP(tick)}`;
-    const clamped = type !== 1 && eff !== null && Math.abs(eff - typed) > 0.005 ? ` (clamped from ${typed.toFixed(2)})` : "";
-    showFill(`${names[type]} ${side ? "sell" : "buy"} ${qty}${at}${clamped} → filled ${res.filled}, resting ${res.resting}`);
+    if (res.rejected) return showFill("order rejected");
+    showFill(fillSummary(type, side, qty, at + clamped, res));
   };
 
-  // spacebar toggles the simulation (unless typing in a field)
+  // Space toggles the sim — but only when focus is on a non-interactive element, so it
+  // never steals Space from a focused button / input / the keyboard-operable ladder.
   window.addEventListener("keydown", (e) => {
-    if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLSelectElement)) {
-      e.preventDefault();
-      togglePlay();
-    }
+    if (e.code !== "Space") return;
+    const t = e.target as HTMLElement | null;
+    if (t && t.closest('button, a, input, select, textarea, [role="button"]')) return;
+    e.preventDefault();
+    togglePlay();
   });
 }
 

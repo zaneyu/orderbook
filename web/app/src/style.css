@@ -25,6 +25,20 @@
 
 * { box-sizing: border-box; }
 
+/* [hidden] must win over the flex/panel display rules below (prevents a boot FOUC) */
+[hidden] { display: none !important; }
+
+/* visually hidden, still read by assistive tech */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 html, body { height: 100%; }
 
 body {
@@ -70,7 +84,7 @@ body {
   border-bottom: 1px solid var(--line);
   padding-bottom: 12px;
 }
-.brand { font-family: var(--mono); font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+.brand { margin: 0; font-family: var(--mono); font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
 .brand .mark { color: var(--amber); }
 .brand .sub {
   display: block;
@@ -193,12 +207,16 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   align-items: center;
-  height: 22px;
+  height: 24px;   /* >= WCAG 2.5.8 target minimum */
   padding: 0 14px;
   font-family: var(--mono);
   font-size: 13px;
   cursor: pointer;
   user-select: none;   /* clicking to trade shouldn't select the price text */
+}
+.lrow:not(.empty):focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
 }
 .lrow.empty { cursor: default; }
 .lrow:not(.empty):hover { background: rgba(239, 233, 221, 0.05); }
@@ -259,9 +277,9 @@ body {
 }
 .trow .tz { color: var(--dim); }
 .trow.up .tp { color: var(--bid); }
+.trow.up .tp::after { content: " ▲"; font-size: 9px; }
 .trow.down .tp { color: var(--ask); }
-.trow.enter { animation: slidein 0.3s var(--ease); }
-@keyframes slidein { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.trow.down .tp::after { content: " ▼"; font-size: 9px; }
 
 /* ---------------------------------------------------------------- controls */
 .controls { display: flex; flex-direction: column; gap: 10px; }
@@ -304,11 +322,11 @@ input[type="range"] { accent-color: var(--amber); cursor: pointer; }
 .seg button.on[data-v="1"] { background: rgba(240, 119, 107, 0.16); color: var(--ask); }
 
 .in {
-  font-family: var(--mono); font-size: 13px; color: var(--text);
+  font-family: var(--mono); font-size: 16px; color: var(--text);  /* >=16px: no iOS focus-zoom */
   background: var(--panel-2); border: 1px solid var(--line);
-  border-radius: 9px; padding: 9px 12px; min-height: 40px;
+  border-radius: 9px; padding: 8px 12px; min-height: 40px;
 }
-input.in { width: 92px; }
+input.in { width: 96px; }
 .in:disabled {
   opacity: 0.4;
   cursor: not-allowed;
