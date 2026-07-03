@@ -1,18 +1,21 @@
 import "./style.css";
 
 // ---- price domain -----------------------------------------------------------
-const TICKS = 2048;
-const MIDTICK = 1024;
+// Integer ticks of $0.01 over a wide band ($0.01–$999.99); the instrument opens at
+// $100.00 (tick 10000). The band is far enough from normal movement that it never
+// binds — a real venue's price band, not an artificial ±10% wall.
 const TICK_SIZE = 0.01;
+const TICKS = 100000;
+const START_TICK = 10000; // $100.00
 const DEPTH = 11;
 
-const toPrice = (t: number) => (t < 0 ? null : 100 + (t - MIDTICK) * TICK_SIZE);
+const toPrice = (t: number) => (t < 0 ? null : t * TICK_SIZE);
 const fmtP = (t: number) => {
   const p = toPrice(t);
   return p === null ? "—" : p.toFixed(2);
 };
 const toTick = (price: number) =>
-  Math.max(0, Math.min(TICKS - 1, Math.round((price - 100) / TICK_SIZE + MIDTICK)));
+  Math.max(1, Math.min(TICKS - 2, Math.round(price / TICK_SIZE)));
 const fmtN = (n: number) => Math.round(n).toLocaleString("en-US");
 const fmtK = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : (n / 1e3).toFixed(1) + "k");
 
@@ -97,7 +100,7 @@ async function boot() {
   const obUrl = new URL("ob.js", document.baseURI).href;
   const mod: any = await import(/* @vite-ignore */ obUrl);
   const Module = await mod.default();
-  sim = new Module.Sim(TICKS);
+  sim = new Module.Sim(TICKS, START_TICK);
 
   askRows = buildRows($("asks"), "ask");
   bidRows = buildRows($("bids"), "bid");
@@ -112,9 +115,15 @@ async function boot() {
   $("app").hidden = false;
   reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  let lastFrame = performance.now();
   const frame = () => {
+    const now = performance.now();
+    let dt = (now - lastFrame) / (1000 / 60); // wall-clock, in 60fps-frame units
+    lastFrame = now;
+    if (!Number.isFinite(dt) || dt < 0) dt = 0;
+    if (dt > 4) dt = 4; // cap a hitch / tab-away so the price doesn't leap
     if (running && speed > 0) {
-      sim.step(speed);
+      sim.step(speed, dt);
       stepAccum += speed;
     }
     render(sim.snapshot(DEPTH));
@@ -149,7 +158,7 @@ function render(snap: any) {
   const priceEl = $<HTMLInputElement>("price");
   if (!priceDirty && document.activeElement !== priceEl && !priceEl.disabled) {
     const midTick =
-      snap.bestBid >= 0 && snap.bestAsk >= 0 ? Math.round((snap.bestBid + snap.bestAsk) / 2) : MIDTICK;
+      snap.bestBid >= 0 && snap.bestAsk >= 0 ? Math.round((snap.bestBid + snap.bestAsk) / 2) : START_TICK;
     priceEl.value = fmtP(midTick);
   }
 

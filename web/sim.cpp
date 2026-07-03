@@ -22,16 +22,21 @@ using emscripten::val;
 namespace {
 constexpr std::size_t RESERVE = 1u << 16;  // pool/id-map capacity (live orders capped well below)
 
-// --- price-process parameters (per micro-step; a frame runs ~250 of them) ---
+// The price process is advanced by WALL-CLOCK time (a `dt` in 60fps-frame units), not
+// per render frame or per order event — so price velocity is identical at any refresh
+// rate, and the "speed" control changes market activity, not how fast the price moves.
+// Units are ticks (1 tick = $0.01), rates per frame-equivalent. Calibrated for a ~$100
+// instrument: lively but realistic (tens of cents/sec, trends lasting several seconds).
 constexpr double kKappaVol = 0.02;    // mean-reversion speed of log-volatility
-constexpr double kSigmaVol = 0.08;    // vol-of-vol -> volatility *clusters*
-constexpr double kKappaDrift = 0.003; // mean-reversion of momentum (small -> trends persist)
-constexpr double kSigmaDrift = 0.004; // momentum innovation
-constexpr double kDriftClamp = 0.09;  // cap on drift (ticks/step)
-constexpr double kFlowScale = 0.03;   // how sharply aggressive flow leans with drift
-constexpr double kImpact = 0.014;     // permanent market impact per filled unit (ticks)
-constexpr double kVolFloor = 0.008;
-constexpr double kVolCeil = 0.45;
+constexpr double kSigmaVol = 0.13;    // vol-of-vol -> volatility *clusters*
+constexpr double kKappaDrift = 0.006; // mean-reversion of momentum (trends persist ~seconds)
+constexpr double kSigmaDrift = 0.07;  // momentum innovation (ticks/frame)
+constexpr double kDriftClamp = 2.5;   // cap on drift (ticks/frame ~= $0.025 -> ~$1.5/s)
+constexpr double kFlowScale = 0.9;    // how sharply aggressive flow leans with drift
+constexpr double kImpact = 0.05;      // permanent market impact per filled unit (ticks)
+constexpr double kVolFloor = 0.3;     // ticks/frame
+constexpr double kVolCeil = 25.0;
+constexpr double kJumpPerFrame = 1.0 / 600.0;  // spontaneous-news hazard per frame (~1 / 10s)
 
 double clampd(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
@@ -51,10 +56,13 @@ struct UserOrder {
 
 class Sim {
 public:
-    explicit Sim(int ticks)
-        : ticks_(ticks), book_(ticks, RESERVE), rng_(0x9E3779B9ull), fv_(ticks / 2.0) {
-        logvol_mean_ = std::log(0.055);
+    // `start` is the tick the instrument opens at (e.g. tick for $100.00).
+    Sim(int ticks, int start)
+        : ticks_(ticks), book_(ticks, RESERVE), rng_(0x9E3779B9ull),
+          start_(start), fv_(start) {
+        logvol_mean_ = std::log(2.5);  // until the UI sets turbulence
         logvol_ = logvol_mean_;
+        vol_ = std::exp(logvol_);
         seed();
     }
 
@@ -66,9 +74,10 @@ public:
         next_id_ = 1;
         trades_ = 0;
         last_ = -1;
-        fv_ = ticks_ / 2.0;
+        fv_ = start_;
         drift_ = 0.0;
         logvol_ = logvol_mean_;
+        vol_ = std::exp(logvol_);
         seed();
     }
 
@@ -116,7 +125,11 @@ public:
         return r;
     }
 
-    void step(int n) {
+    // One render frame: advance the price by dt (in 60fps-frame units of wall-clock
+    // time), then run n order events around it. dt sets price velocity (refresh-rate
+    // independent); n only sets activity.
+    void step(int n, double dt) {
+        evolve_price(dt);
         for (int i = 0; i < n; ++i) one_step();
     }
 
@@ -124,17 +137,17 @@ public:
     // dir = +1 bullish, -1 bearish.
     void news(int dir) {
         const double d = dir >= 0 ? 1.0 : -1.0;
-        const double jump = d * (14.0 + std::abs(nd_(rng_)) * 12.0);  // ~0.14–0.40 in price
+        const double jump = d * (40.0 + std::abs(nd_(rng_)) * 40.0);  // ~$0.40–$1.20
         fv_ += jump;
-        drift_ += d * 0.045;                 // ignites a trend that mean-reverts away
-        logvol_ = std::min(kVolCeil, logvol_ + 0.6);  // volatility jumps on news
+        drift_ += d * 1.5;                    // ignites a trend that mean-reverts away
+        logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.6);  // volatility jumps on news
         clamp_fv();
     }
 
     // Set the ambient turbulence, x in [0,1]: raises the mean of log-volatility.
     void setTurbulence(double x) {
         x = clampd(x, 0.0, 1.0);
-        logvol_mean_ = std::log(0.02 + x * 0.26);  // calm ~0.02  ->  turbulent ~0.28
+        logvol_mean_ = std::log(1.0 + x * 9.0);  // calm ~1  ->  turbulent ~10 ticks/frame
     }
 
     // Full view for one render frame: L2 ladder + stats + tape + market state.
@@ -157,8 +170,8 @@ public:
         else
             mid = fv_;
         o.set("midTick", mid);
-        o.set("vol01", clampd((std::exp(logvol_) - 0.02) / 0.20, 0.0, 1.0));
-        o.set("trend", clampd(drift_ / 0.06, -1.0, 1.0));
+        o.set("vol01", clampd((vol_ - 1.0) / 9.0, 0.0, 1.0));
+        o.set("trend", clampd(drift_ / 2.0, -1.0, 1.0));
 
         val t = val::array();
         int i = 0;
@@ -219,36 +232,39 @@ private:
     double u01() { return (rng_() % 1000000u) / 1000000.0; }
 
     void clamp_fv() {
-        const double lo = 6.0, hi = ticks_ - 7.0;
-        fv_ = clampd(fv_, lo, hi);
+        // A far safety bound at the array edges only — normal movement never reaches it.
+        fv_ = clampd(fv_, 2.0, ticks_ - 3.0);
     }
 
-    // Advance the latent market state by one micro-step, then emit one order.
-    void one_step() {
-        fills_.clear();
+    // Advance the latent market state by dt frame-equivalents: stochastic volatility
+    // (clustering), an OU momentum/trend, rare fat-tailed news jumps, and diffusion.
+    // Mean-reversion/drift scale with dt; diffusion noise with sqrt(dt) (Euler–Maruyama),
+    // so the process is identical whether called at 60 or 240 Hz.
+    void evolve_price(double dt) {
+        if (dt <= 0.0) return;
+        const double sdt = std::sqrt(dt);
 
-        // 1) stochastic volatility — log-vol mean-reverts with its own shocks (clustering)
-        logvol_ += kKappaVol * (logvol_mean_ - logvol_) + kSigmaVol * nd_(rng_);
+        logvol_ += kKappaVol * (logvol_mean_ - logvol_) * dt + kSigmaVol * sdt * nd_(rng_);
         logvol_ = clampd(logvol_, std::log(kVolFloor), std::log(kVolCeil));
-        const double vol = std::exp(logvol_);
+        vol_ = std::exp(logvol_);
 
-        // 2) momentum — an OU process; small mean-reversion means trends persist for a while
-        drift_ += -kKappaDrift * drift_ + kSigmaDrift * nd_(rng_);
+        drift_ += -kKappaDrift * drift_ * dt + kSigmaDrift * sdt * nd_(rng_);
         drift_ = clampd(drift_, -kDriftClamp, kDriftClamp);
 
-        // 3) rare fat-tailed jump (spontaneous news), with a matching vol spike
-        if ((rng_() % 40000u) == 0u) {
-            const double j = nd_(rng_) * 10.0;
+        if (u01() < kJumpPerFrame * dt) {  // spontaneous news (Poisson), ~ every 10s
+            const double j = nd_(rng_) * 25.0;
             fv_ += j;
-            drift_ += (j > 0 ? 1.0 : -1.0) * 0.02;
-            logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.5);
+            drift_ += (j > 0 ? 1.0 : -1.0) * 1.5;
+            logvol_ = std::min(std::log(kVolCeil), logvol_ + 0.6);
         }
 
-        // 4) diffusion around the drifting fair value
-        fv_ += drift_ + vol * nd_(rng_);
+        fv_ += drift_ * dt + vol_ * sdt * nd_(rng_);
         clamp_fv();
+    }
 
-        // --- order flow, conditioned on the state ---
+    // Emit one order event around the current fair value (no price evolution here).
+    void one_step() {
+        fills_.clear();
         const double p_aggr_buy = 1.0 / (1.0 + std::exp(-drift_ / kFlowScale));  // informed flow leans with the trend
         const Price mid = static_cast<Price>(std::llround(fv_));
         const OrderId id = next_id_++;
@@ -256,7 +272,7 @@ private:
 
         if (roll < 46) {  // provide depth: a resting limit near the touch; spread widens with vol
             const bool buy = u01() < 0.5;
-            const Price base = static_cast<Price>(1 + std::llround(vol / 0.02));  // 1..~13 ticks off
+            const Price base = static_cast<Price>(1 + std::llround(vol_ / 3.0));  // 1..~7 ticks off
             const Price off = base + static_cast<Price>(rng_() % 3);
             const Price px = buy ? mid - off : mid + off;
             const Qty q = lot(10.0);
@@ -293,8 +309,10 @@ private:
     std::normal_distribution<double> nd_{0.0, 1.0};
 
     // latent market state
+    double start_;              // opening fair value (ticks)
     double fv_;                 // fair value (fractional ticks)
-    double drift_ = 0.0;        // momentum (ticks/step)
+    double drift_ = 0.0;        // momentum (ticks/frame)
+    double vol_ = 4.0;          // instantaneous volatility (ticks/frame)
     double logvol_ = 0.0;       // log instantaneous volatility
     double logvol_mean_ = 0.0;  // target log-volatility (set by turbulence)
 
@@ -309,10 +327,10 @@ private:
 
 EMSCRIPTEN_BINDINGS(orderbook) {
     emscripten::class_<Sim>("Sim")
-        .constructor<int>()
+        .constructor<int, int>()
         .function("reset", &Sim::reset)
         .function("submit", &Sim::submit)
-        .function("step", &Sim::step)
+        .function("step", &Sim::step)  // step(n, dt)
         .function("news", &Sim::news)
         .function("setTurbulence", &Sim::setTurbulence)
         .function("snapshot", &Sim::snapshot);
