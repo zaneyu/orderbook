@@ -906,6 +906,15 @@ function updateStrats(snap: any) {
   setPos($("mrPos"), st.mr.inv);
   setSig($("mrSig"), st.mr.signal);
 
+  // mark the leading enabled strategy (the "watch who wins" payoff)
+  const runners: [string, number][] = [];
+  if (mm.on) runners.push(["mm", mmPnl]);
+  if (st.mom.on) runners.push(["mom", momPnl]);
+  if (st.mr.on) runners.push(["mr", mrPnl]);
+  const leader = runners.length > 1 ? runners.reduce((a, b) => (b[1] > a[1] ? b : a))[0] : null;
+  for (const key of ["mm", "mom", "mr"])
+    document.querySelector(`.strat[data-strat="${key}"]`)?.classList.toggle("leading", key === leader);
+
   const now = performance.now();
   if (now - stratSampleT >= SAMPLE_MS) {
     stratSampleT = now;
