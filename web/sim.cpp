@@ -81,6 +81,10 @@ public:
         drift_ = 0.0;
         logvol_ = logvol_mean_;
         vol_ = std::exp(logvol_);
+        // the new book invalidates the maker's quote ids; clear its state (keep on/config)
+        mm_bid_id_ = mm_ask_id_ = 0;
+        mm_bid_px_ = mm_ask_px_ = -1;
+        mmFlatten();
         seed();
     }
 
@@ -113,6 +117,8 @@ public:
                 break;
         }
         record();
+        double notional = 0;  // sum of immediate fill price*qty (ticks) -> average fill price
+        for (const auto& f : fills_) notional += static_cast<double>(f.price) * f.qty;
         // Aggressive flow (what actually crossed) pushes fair value — market impact.
         const int filled = qty - static_cast<int>(rem);
         if (filled > 0) {
@@ -124,10 +130,8 @@ public:
         // resting remainder — not the simulator randomly cancelling it.)
         if (type == 0) {
             UserOrder u{id, s, static_cast<Price>(price), qty};
-            for (const auto& f : fills_) {  // immediate fills belong to this taker
-                u.filled += static_cast<int>(f.qty);
-                u.notional += static_cast<double>(f.price) * f.qty;
-            }
+            u.filled = filled;      // immediate fills belong to this taker
+            u.notional = notional;
             if (u.filled >= u.orig) u.done = true;
             mine_.push_front(u);
             while (mine_.size() > 6) {  // bound: expire the oldest working order
@@ -137,9 +141,40 @@ public:
             }
         }
         val r = val::object();
+        r.set("id", static_cast<double>(id));
         r.set("filled", filled);
         r.set("resting", static_cast<int>(rem));
+        r.set("avgTick", filled > 0 ? notional / filled : -1.0);
         return r;
+    }
+
+    // Cancel a resting order by id (used by the execution lab to pull a passive child).
+    // Also marks any tracked working order done so the UI stops following it.
+    bool cancelOrder(double idd) {
+        const OrderId id = static_cast<OrderId>(idd);
+        const bool ok = book_.cancel(id);
+        for (auto& u : mine_)
+            if (u.id == id) { u.done = true; break; }
+        return ok;
+    }
+
+    // --- market maker: an automated two-sided quoter (see mm_* below) ---
+    void mmEnable(bool on) {
+        mm_on_ = on;
+        if (!on) mm_cancel_quotes();  // stop quoting; keep inventory + realized PnL
+    }
+    void mmConfig(int half, int size, int invLimit) {
+        mm_half_ = static_cast<Price>(half < 1 ? 1 : half);
+        mm_size_ = size < 1 ? 1 : (size > kMaxQty ? kMaxQty : size);
+        mm_invlimit_ = invLimit < 1 ? 1 : invLimit;
+    }
+    void mmFlatten() {  // reset the maker's book-keeping to flat (does not touch the market)
+        mm_inv_ = 0;
+        mm_avgcost_ = 0;
+        mm_realized_ = 0;
+        mm_spread_ = 0;
+        mm_fills_ = 0;
+        mm_volume_ = 0;
     }
 
     // One render frame: advance the price by dt (in 60fps-frame units of wall-clock
@@ -147,6 +182,7 @@ public:
     // independent); n only sets activity.
     void step(int n, double dt) {
         evolve_price(dt);
+        mm_requote();  // refresh the maker's two-sided quotes before this frame's flow
         for (int i = 0; i < n; ++i) one_step();
     }
 
@@ -214,6 +250,27 @@ public:
             mine.call<void>("push", e);
         }
         o.set("mine", mine);
+
+        // market-maker state (inventory, PnL decomposition, live quotes)
+        val mm = val::object();
+        mm.set("on", mm_on_);
+        mm.set("inv", static_cast<double>(mm_inv_));
+        mm.set("invLimit", static_cast<double>(mm_invlimit_));
+        mm.set("half", static_cast<double>(mm_half_));
+        mm.set("size", static_cast<double>(mm_size_));
+        mm.set("bidPx", mm_bid_id_ ? static_cast<double>(mm_bid_px_) : -1.0);
+        mm.set("askPx", mm_ask_id_ ? static_cast<double>(mm_ask_px_) : -1.0);
+        // Total mark-to-market PnL = realized (closed lots) + unrealized (open MTM).
+        // Decomposed honestly into spread capture (edge vs fair at each fill) and the
+        // inventory / adverse-selection remainder (total − spread).
+        const double unreal = static_cast<double>(mm_inv_) * (mid - mm_avgcost_);  // ticks*shares
+        const double total = mm_realized_ + unreal;
+        mm.set("pnlTick", total);
+        mm.set("spreadTick", mm_spread_);
+        mm.set("adverseTick", total - mm_spread_);
+        mm.set("fills", static_cast<double>(mm_fills_));
+        mm.set("volume", static_cast<double>(mm_volume_));
+        o.set("mm", mm);
         return o;
     }
 
@@ -243,6 +300,13 @@ private:
                     break;
                 }
             }
+            // Book any fill involving the maker's orders into inventory/PnL. A fill's maker
+            // and taker are distinct ids, so this chain books each fill exactly once — the
+            // taker cases are a safety net in case a quote ever crosses (it shouldn't).
+            if (f.maker == mm_bid_id_ || f.taker == mm_bid_id_)
+                mm_apply_fill(static_cast<double>(f.price), static_cast<long long>(f.qty));  // maker bought
+            else if (f.maker == mm_ask_id_ || f.taker == mm_ask_id_)
+                mm_apply_fill(static_cast<double>(f.price), -static_cast<long long>(f.qty));  // maker sold
         }
         while (tape_.size() > 60) tape_.pop_back();
     }
@@ -320,6 +384,78 @@ private:
         return static_cast<Qty>(clampd(std::llround(v), 1.0, 400.0));
     }
 
+    // ---- market maker ------------------------------------------------------
+    void mm_cancel_quotes() {
+        if (mm_bid_id_) { book_.cancel(mm_bid_id_); mm_bid_id_ = 0; mm_bid_px_ = -1; }
+        if (mm_ask_id_) { book_.cancel(mm_ask_id_); mm_ask_id_ = 0; mm_ask_px_ = -1; }
+    }
+
+    // Refresh two-sided quotes each frame around a reservation price skewed by inventory
+    // (Avellaneda–Stoikov style): the more inventory it holds, the more it shades quotes to
+    // offload it. Hard inventory limit stops it quoting the side that would grow the position.
+    void mm_requote() {
+        mm_cancel_quotes();
+        if (!mm_on_) return;
+        // Clear the stale fill batch left by the previous frame's last one_step so the
+        // record() below can't re-book it (double-counting trades/tape/user fills).
+        fills_.clear();
+
+        const double frac = clampd(static_cast<double>(mm_inv_) / static_cast<double>(mm_invlimit_), -1.0, 1.0);
+        // inventory skew (reservation price, Avellaneda–Stoikov): shade quotes to offload.
+        const double reservation = fv_ - frac * (2.0 * mm_half_ + 1.0);
+        Price bidpx = static_cast<Price>(std::llround(reservation)) - mm_half_;
+        Price askpx = static_cast<Price>(std::llround(reservation)) + mm_half_;
+        // Stay strictly passive against the REAL book — never post through the touch and
+        // accidentally take (the earlier fv-based clamp let stale liquidity be crossed).
+        // Range-clamp FIRST, then re-assert the anti-cross so the boundary clamp can't
+        // push a quote back onto the touch.
+        bidpx = static_cast<Price>(clampd(bidpx, 0.0, ticks_ - 1.0));
+        askpx = static_cast<Price>(clampd(askpx, 0.0, ticks_ - 1.0));
+        if (book_.has_ask() && bidpx >= book_.best_ask()) bidpx = book_.best_ask() - 1;
+        if (book_.has_bid() && askpx <= book_.best_bid()) askpx = book_.best_bid() + 1;
+
+        // Hard inventory limit: cap each side's size to the remaining room, so a fill can
+        // never push inventory past the bound (posting the full size could overshoot).
+        const long long bidRoom = std::min<long long>(mm_size_, std::max<long long>(0, mm_invlimit_ - mm_inv_));
+        const long long askRoom = std::min<long long>(mm_size_, std::max<long long>(0, mm_invlimit_ + mm_inv_));
+        if (bidRoom > 0 && bidpx >= 0 && bidpx < ticks_) {
+            mm_bid_id_ = next_id_++;
+            book_.add_limit(mm_bid_id_, Side::Buy, bidpx, static_cast<Qty>(bidRoom), fills_);
+            mm_bid_px_ = bidpx;
+        }
+        if (askRoom > 0 && askpx >= 0 && askpx < ticks_) {
+            mm_ask_id_ = next_id_++;
+            book_.add_limit(mm_ask_id_, Side::Sell, askpx, static_cast<Qty>(askRoom), fills_);
+            mm_ask_px_ = askpx;
+        }
+        record();  // book any fill from this requote (posts are passive, but be safe)
+    }
+
+    // Book a maker fill into position PnL. q > 0 bought, q < 0 sold (both at px, in ticks).
+    void mm_apply_fill(double px, long long q) {
+        // Spread capture: the edge earned vs fair value at the instant of the fill (a bid
+        // fill buys below fv, an ask fill sells above fv). The rest of the total PnL is the
+        // inventory / adverse-selection component (total − spread), computed in snapshot().
+        mm_spread_ += (fv_ - px) * static_cast<double>(q);
+        if ((mm_inv_ > 0 && q < 0) || (mm_inv_ < 0 && q > 0)) {  // reducing/closing the position
+            const long long closing = std::min(std::llabs(q), std::llabs(mm_inv_));
+            const double sign = mm_inv_ > 0 ? 1.0 : -1.0;  // long: profit = px - avgcost
+            mm_realized_ += sign * (px - mm_avgcost_) * static_cast<double>(closing);
+        }
+        const long long newInv = mm_inv_ + q;
+        if (mm_inv_ == 0 || (mm_inv_ > 0 && q > 0) || (mm_inv_ < 0 && q < 0)) {  // adding to the position
+            const double absOld = std::fabs(static_cast<double>(mm_inv_));
+            const double absAdd = std::fabs(static_cast<double>(q));
+            if (absOld + absAdd > 0) mm_avgcost_ = (mm_avgcost_ * absOld + px * absAdd) / (absOld + absAdd);
+        } else if ((mm_inv_ > 0 && newInv < 0) || (mm_inv_ < 0 && newInv > 0)) {  // flipped through zero
+            mm_avgcost_ = px;
+        }
+        mm_inv_ = newInv;
+        if (mm_inv_ == 0) mm_avgcost_ = 0;
+        ++mm_fills_;
+        mm_volume_ += std::llabs(q);
+    }
+
     void seed() {
         for (int i = 0; i < 400; ++i) one_step();
     }
@@ -344,6 +480,20 @@ private:
     OrderId next_id_ = 1;
     std::uint64_t trades_ = 0;
     Price last_ = -1;
+
+    // market maker
+    bool mm_on_ = false;
+    Price mm_half_ = 1;             // half-spread in ticks
+    int mm_size_ = 200;            // quote size (shares per side)
+    long long mm_invlimit_ = 2000;  // hard inventory bound (shares)
+    OrderId mm_bid_id_ = 0, mm_ask_id_ = 0;  // 0 => not currently posted
+    Price mm_bid_px_ = -1, mm_ask_px_ = -1;
+    long long mm_inv_ = 0;          // signed inventory (shares)
+    double mm_avgcost_ = 0;         // avg cost of the current inventory (ticks)
+    double mm_realized_ = 0;        // realized PnL, closed lots (ticks*shares)
+    double mm_spread_ = 0;          // cumulative spread capture vs fair (ticks*shares)
+    long long mm_fills_ = 0;
+    long long mm_volume_ = 0;
 };
 
 EMSCRIPTEN_BINDINGS(orderbook) {
@@ -351,8 +501,12 @@ EMSCRIPTEN_BINDINGS(orderbook) {
         .constructor<int, int>()
         .function("reset", &Sim::reset)
         .function("submit", &Sim::submit)
+        .function("cancelOrder", &Sim::cancelOrder)
         .function("step", &Sim::step)  // step(n, dt)
         .function("news", &Sim::news)
         .function("setTurbulence", &Sim::setTurbulence)
+        .function("mmEnable", &Sim::mmEnable)
+        .function("mmConfig", &Sim::mmConfig)
+        .function("mmFlatten", &Sim::mmFlatten)
         .function("snapshot", &Sim::snapshot);
 }

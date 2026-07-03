@@ -72,33 +72,107 @@
             </label>
           </div>
         </div>
-        <form id="order" class="row2">
-          <div class="seg" id="sideSeg" role="group" aria-label="side">
-            <button type="button" data-v="0" class="on" aria-pressed="true">buy</button>
-            <button type="button" data-v="1" aria-pressed="false">sell</button>
-          </div>
-          <select id="type" class="in" aria-label="order type">
-            <option value="0">limit</option>
-            <option value="1">market</option>
-            <option value="2">IOC</option>
-            <option value="3">FOK</option>
-          </select>
-          <input id="price" class="in mono" inputmode="decimal" aria-label="limit price" value="100.00" />
-          <input id="qty" class="in mono" inputmode="numeric" aria-label="quantity" value="50" />
-          <button type="submit" class="btn primary">submit</button>
-          <span id="fillmsg" class="fillmsg" role="status" aria-live="polite"></span>
-        </form>
-
-        <div id="myorders" class="myorders" hidden>
-          <div class="mo-hdr">your working orders</div>
-          <div id="molist" class="mo-list"></div>
+        <div class="tabs" role="tablist" aria-label="tools">
+          <button role="tab" id="tab-trade" data-tab="trade" class="tab on" aria-selected="true" aria-controls="panel-trade">Trade</button>
+          <button role="tab" id="tab-exec" data-tab="exec" class="tab" aria-selected="false" aria-controls="panel-exec" tabindex="-1">Execution</button>
+          <button role="tab" id="tab-maker" data-tab="maker" class="tab" aria-selected="false" aria-controls="panel-maker" tabindex="-1">Market maker</button>
         </div>
 
-        <p class="hint">
-          Click or focus a ladder level and press <kbd>enter</kbd> to rest an order (bid side
-          buys, ask side sells) · your fills push the price (market impact) · fire a
-          <b>news</b> shock or turn up <b>turbulence</b> · <kbd>space</kbd> pauses
-        </p>
+        <!-- Trade: manual order entry -->
+        <div class="tabpanel" id="panel-trade" data-panel="trade" role="tabpanel" aria-labelledby="tab-trade">
+          <form id="order" class="row2">
+            <div class="seg" id="sideSeg" role="group" aria-label="side">
+              <button type="button" data-v="0" class="on" aria-pressed="true">buy</button>
+              <button type="button" data-v="1" aria-pressed="false">sell</button>
+            </div>
+            <select id="type" class="in" aria-label="order type">
+              <option value="0">limit</option>
+              <option value="1">market</option>
+              <option value="2">IOC</option>
+              <option value="3">FOK</option>
+            </select>
+            <input id="price" class="in mono" inputmode="decimal" aria-label="limit price" value="100.00" />
+            <input id="qty" class="in mono" inputmode="numeric" aria-label="quantity" value="50" />
+            <button type="submit" class="btn primary">submit</button>
+            <span id="fillmsg" class="fillmsg" role="status" aria-live="polite"></span>
+          </form>
+          <div id="myorders" class="myorders" hidden>
+            <div class="mo-hdr">your working orders</div>
+            <div id="molist" class="mo-list"></div>
+          </div>
+          <p class="hint">
+            Click or focus a ladder level and press <kbd>enter</kbd> to rest an order (bid side
+            buys, ask side sells) · your fills push the price (market impact) · fire a
+            <b>news</b> shock or turn up <b>turbulence</b> · <kbd>space</kbd> pauses
+          </p>
+        </div>
+
+        <!-- Execution: work a parent order and measure transaction cost -->
+        <div class="tabpanel" id="panel-exec" data-panel="exec" role="tabpanel" aria-labelledby="tab-exec" hidden>
+          <form id="execForm" class="exec-cfg">
+            <div class="seg" id="execSide" role="group" aria-label="parent side">
+              <button type="button" data-v="1" class="on" aria-pressed="true">sell</button>
+              <button type="button" data-v="0" aria-pressed="false">buy</button>
+            </div>
+            <label class="fld">size <input id="execQty" class="in mono" inputmode="numeric" value="5000" aria-label="parent size" /></label>
+            <label class="fld">strategy
+              <select id="execAlgo" class="in" aria-label="execution strategy">
+                <option value="market">Market now</option>
+                <option value="twap">TWAP</option>
+                <option value="passive">Passive limit</option>
+              </select>
+            </label>
+            <label class="fld exec-twap">slices <input id="execSlices" class="in mono" inputmode="numeric" value="20" aria-label="TWAP slices" /></label>
+            <label class="fld exec-horizon">over <input id="execHoriz" class="in mono" inputmode="numeric" value="10" aria-label="horizon seconds" />s</label>
+            <button type="submit" id="execRun" class="btn primary">run</button>
+            <button type="button" id="execCancel" class="btn" hidden>cancel</button>
+          </form>
+          <div id="execLive" class="exec-live" role="status" aria-live="polite"></div>
+          <div class="exec-tablewrap">
+            <table class="exec-table">
+              <thead><tr>
+                <th scope="col">strategy</th><th scope="col">order</th><th scope="col" class="num">avg px</th>
+                <th scope="col" class="num">slippage</th><th scope="col" class="num">fill</th>
+                <th scope="col" class="num">mid Δ</th><th scope="col" class="num">time</th>
+              </tr></thead>
+              <tbody id="execRows"></tbody>
+            </table>
+          </div>
+          <p class="hint">
+            Work a parent order through the live book. <b>Slippage</b> is the realized average
+            price vs the mid at arrival (negative = a cost); <b>mid Δ</b> is how far the mid
+            moved over the fill window (your impact plus market drift). Run the same order a
+            few times to compare strategies.
+          </p>
+        </div>
+
+        <!-- Market maker: an automated two-sided quoter -->
+        <div class="tabpanel" id="panel-maker" data-panel="maker" role="tabpanel" aria-labelledby="tab-maker" hidden>
+          <div class="maker-ctrl">
+            <button id="mmToggle" type="button" class="btn primary" aria-pressed="false">start quoting</button>
+            <label class="fld">half-spread <input id="mmHalf" class="in mono" inputmode="numeric" value="1" aria-label="half spread in cents" />¢</label>
+            <label class="fld">size <input id="mmSize" class="in mono" inputmode="numeric" value="200" aria-label="quote size" /></label>
+            <label class="fld">inv limit <input id="mmInv" class="in mono" inputmode="numeric" value="2000" aria-label="inventory limit" /></label>
+            <button id="mmFlat" type="button" class="btn">reset P&amp;L</button>
+          </div>
+          <div class="maker-dash">
+            <div class="mm-stat"><span class="lbl">total P&amp;L</span><b id="mmPnl" class="mono">$0.00</b></div>
+            <div class="mm-stat"><span class="lbl">spread capture</span><b id="mmReal" class="mono">$0.00</b></div>
+            <div class="mm-stat"><span class="lbl">inventory · adverse</span><b id="mmUnreal" class="mono">$0.00</b></div>
+            <div class="mm-stat"><span class="lbl">inventory</span><b id="mmInvv" class="mono">0</b></div>
+            <div class="mm-stat"><span class="lbl">quotes</span><b id="mmQuotes" class="mono">— / —</b></div>
+            <div class="mm-stat"><span class="lbl">fills</span><b id="mmFills" class="mono">0</b></div>
+          </div>
+          <canvas id="mmChart" class="mm-chart" aria-hidden="true"></canvas>
+          <div class="mm-invbar" aria-hidden="true"><span class="mm-invmid"></span><i id="mmInvFill"></i></div>
+          <p class="hint">
+            The maker quotes both sides. <b>Spread capture</b> is the edge earned vs fair
+            value on every fill; <b>inventory · adverse</b> is the mark-to-market of the
+            position it's left holding (total = spread + inventory). It builds inventory when
+            the market runs one way — turn up <b>turbulence</b> or fire <b>news</b> and watch
+            the spread grind up while adverse selection eats it.
+          </p>
+        </div>
       </section>
 
       <footer class="stats">

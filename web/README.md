@@ -22,8 +22,20 @@ npm run dev          # or: npm run build && npm run preview
 ```
 
 Open the printed URL. The engine steps the simulated flow each frame; Pause/Play, drag
-speed, fire news shocks, turn up turbulence, click a ladder level to rest an order, or
+activity, fire news shocks, turn up turbulence, click a ladder level to rest an order, or
 submit from the form and watch your working orders fill.
+
+Two applications are built on the same engine, in tabs:
+
+- **Execution & TCA** — work a parent order through the live book via *Market now*,
+  *TWAP* (sliced over a horizon), or *Passive limit*, and measure the realized average
+  price vs the arrival mid (slippage, in bps), fill rate, and the mid move over the
+  window. Run the same order a few times to compare strategies — the best-execution
+  trade-off, measured the way a desk measures it.
+- **Market maker** — an automated two-sided quoter with inventory-skewed (Avellaneda–
+  Stoikov) quotes and a hard inventory limit. Live PnL is decomposed into **spread
+  capture** (edge vs fair value on each fill) and **inventory / adverse selection**
+  (mark-to-market of the position it's left holding); `total = spread + inventory`.
 
 ## Rebuild the WASM (only if the engine or bindings change)
 

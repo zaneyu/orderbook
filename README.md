@@ -5,10 +5,17 @@
 fuzzing.
 
 **▶ Live demo: https://orderbook.pages.dev** — the same engine compiled to WebAssembly,
-matching a simulated market in your browser. The price process is a real one (stochastic
-volatility, trends, fat-tailed news jumps); fire a news shock, turn up turbulence, click a
-level to trade (your fills move the price), and watch your working orders fill. Source in
-[`web/`](web/).
+matching a simulated market in your browser, with two applications built on top of it:
+
+- **Trade** — click a level to trade (your fills move the price via market impact) and
+  track your working orders' fills, average price, and live P&L.
+- **Execution & TCA** — work a parent order via Market / TWAP / Passive and measure
+  slippage vs the arrival mid (bps), fill rate, and market impact.
+- **Market maker** — an inventory-skewed two-sided quoter with live P&L split into
+  spread capture vs adverse selection.
+
+The price process is a real one (stochastic volatility, trends, fat-tailed news jumps).
+Source in [`web/`](web/).
 
 ## Latency
 

@@ -115,13 +115,13 @@ async function boot() {
   bidRows = buildRows($("bids"), "bid");
   spark = $<HTMLCanvasElement>("spark");
   sctx = spark.getContext("2d")!;
-  sizeSpark();
   window.addEventListener("resize", sizeSpark);
   wireControls();
   wireLadder();
 
   $("boot").remove();
   $("app").hidden = false;
+  sizeSpark(); // size the canvas AFTER the app is laid out (hidden => zero size)
   const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
   reduceMotion = mq.matches;
   mq.addEventListener("change", (e) => (reduceMotion = e.matches));
@@ -186,8 +186,11 @@ function render(snap: any) {
     lastTapeHTML = html;
   }
 
+  lastMidPrice = toPrice(snap.midTick) ?? lastMidPrice;
   updateMarketState(snap);
   renderMine(snap);
+  updateExec(snap);
+  updateMaker(snap);
 
   $("trades").textContent = fmtN(snap.trades);
   $("resting").textContent = fmtN(snap.resting);
@@ -566,7 +569,345 @@ function wireControls() {
   });
 }
 
-boot().catch((err) => {
-  const b = document.getElementById("boot");
-  if (b) b.textContent = "failed to load the engine: " + err;
-});
+// ============================================================================
+//  Applications built on the engine: tabs, an execution/TCA lab, a market maker
+// ============================================================================
+let lastMidPrice = 100;
+
+function readIntInput(id: string): number | null {
+  const raw = $<HTMLInputElement>(id).value.trim();
+  const n = parseInt(raw, 10);
+  if (!raw || !Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+function money(v: number): string {
+  return (v >= 0 ? "+$" : "−$") + Math.abs(v).toFixed(2);
+}
+function setMoney(el: HTMLElement, v: number) {
+  el.textContent = money(v);
+  el.className = "mono " + (v > 0.005 ? "pos" : v < -0.005 ? "neg" : "");
+}
+
+// ---- tabs -------------------------------------------------------------------
+function wireTabs() {
+  const tabs = Array.from(document.querySelectorAll<HTMLElement>(".tab"));
+  const panels = Array.from(document.querySelectorAll<HTMLElement>(".tabpanel"));
+  const select = (name: string) => {
+    for (const t of tabs) {
+      const on = t.dataset.tab === name;
+      t.classList.toggle("on", on);
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.tabIndex = on ? 0 : -1;
+    }
+    for (const p of panels) p.hidden = p.dataset.panel !== name;
+    activePanel = name;
+    if (name === "maker") sizeMm(); // canvas was zero-sized while its panel was hidden
+  };
+  tabs.forEach((t, i) => {
+    t.addEventListener("click", () => select(t.dataset.tab!));
+    t.addEventListener("keydown", (e) => {
+      let next = -1;
+      if (e.key === "ArrowRight") next = (i + 1) % tabs.length;
+      else if (e.key === "ArrowLeft") next = (i + tabs.length - 1) % tabs.length;
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = tabs.length - 1;
+      else return;
+      e.preventDefault();
+      tabs[next].focus();
+      select(tabs[next].dataset.tab!);
+    });
+  });
+  select("trade"); // set the initial roving tabindex / selected state
+}
+let activePanel = "trade";
+
+// ---- execution / TCA lab ----------------------------------------------------
+type Exec = {
+  algo: "market" | "twap" | "passive";
+  side: number;
+  qty: number;
+  filled: number;
+  notionalTick: number;
+  arrivalMid: number;
+  startT: number;
+  passiveId?: number;
+  horizonMs?: number;
+  twapTimer?: number;
+  slicesLeft?: number;
+  sent?: number;
+  slices?: number;
+};
+let exec: Exec | null = null;
+let execSideV = 1; // default sell
+const execHistory: string[] = [];
+
+function setExecSide(v: number) {
+  execSideV = v;
+  $("execSide")
+    .querySelectorAll("button")
+    .forEach((b) => {
+      const on = +(b.dataset.v || 0) === v;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+}
+function setExecLive(msg: string) {
+  $("execLive").textContent = msg;
+}
+function submitChild(side: number, qty: number) {
+  if (qty <= 0 || !exec) return;
+  const res = sim.submit(1, side, 0, qty); // market child
+  const f = res.filled as number;
+  if (f > 0 && res.avgTick >= 0) {
+    exec.filled += f;
+    exec.notionalTick += res.avgTick * f;
+  }
+}
+function startExec() {
+  if (exec) return;
+  const qty = readIntInput("execQty");
+  if (qty === null) return setExecLive("enter a valid size");
+  const algo = $<HTMLSelectElement>("execAlgo").value as Exec["algo"];
+  const side = execSideV;
+  exec = { algo, side, qty, filled: 0, notionalTick: 0, arrivalMid: lastMidPrice, startT: performance.now() };
+  $<HTMLButtonElement>("execRun").hidden = true;
+  $<HTMLButtonElement>("execCancel").hidden = false;
+
+  if (algo === "market") {
+    submitChild(side, qty);
+    finalizeExec();
+  } else if (algo === "twap") {
+    const slices = Math.max(1, readIntInput("execSlices") ?? 20);
+    const horizonS = Math.max(1, readIntInput("execHoriz") ?? 10);
+    exec.slices = slices;
+    exec.slicesLeft = slices;
+    exec.sent = 0;
+    exec.horizonMs = horizonS * 1000;
+    const tick = () => {
+      if (!exec) return;
+      if (!running) return; // respect a paused market: don't slice into a frozen book
+      const last = exec.slicesLeft! <= 1;
+      const child = last ? exec.qty - exec.sent! : Math.floor(exec.qty / exec.slices!);
+      submitChild(exec.side, child);
+      exec.sent! += child;
+      exec.slicesLeft!--;
+      if (last || exec.sent! >= exec.qty) {
+        window.clearInterval(exec.twapTimer);
+        finalizeExec();
+      }
+    };
+    exec.twapTimer = window.setInterval(tick, Math.max(60, exec.horizonMs / slices));
+  } else {
+    // passive: rest a limit at our near touch (buy at best bid, sell at best ask)
+    const horizonS = Math.max(1, readIntInput("execHoriz") ?? 12);
+    exec.horizonMs = horizonS * 1000;
+    // Rest at our near touch (buy at best bid, sell at best ask), read from a FRESH
+    // top-of-book so a fast tick can't leave us posting a crossing (marketable) price.
+    const s = sim.snapshot(1);
+    const px = side === 0 ? s.bestBid : s.bestAsk;
+    const tick = px >= 0 ? px : toTick(exec.arrivalMid);
+    const res = sim.submit(0, side, tick, qty);
+    exec.passiveId = res.id;
+    // The resting order's cumulative fills are the single source of truth (read from the
+    // snapshot each frame in updateExec), so we don't separately add the immediate fill.
+  }
+}
+function updateExec(snap: any) {
+  if (!exec) return;
+  if (exec.algo === "passive" && exec.passiveId != null) {
+    const m = (snap.mine as any[]).find((o) => o.id === exec!.passiveId);
+    if (m) {
+      exec.filled = Math.min(m.filled, exec.qty);
+      exec.notionalTick = m.avgTick >= 0 ? m.avgTick * exec.filled : 0;
+      if (m.done || exec.filled >= exec.qty) return finalizeExec();
+    }
+    if (running && performance.now() - exec.startT > (exec.horizonMs ?? 12000)) {
+      sim.cancelOrder(exec.passiveId);
+      return finalizeExec();
+    }
+  }
+  const pct = Math.round((exec.filled / exec.qty) * 100);
+  setExecLive(`working ${exec.algo} · filled ${fmtN(exec.filled)}/${fmtN(exec.qty)} (${pct}%)`);
+}
+function finalizeExec() {
+  if (!exec) return;
+  const e = exec;
+  exec = null;
+  if (e.twapTimer) window.clearInterval(e.twapTimer);
+  $<HTMLButtonElement>("execRun").hidden = false;
+  $<HTMLButtonElement>("execCancel").hidden = true;
+  setExecLive("");
+
+  const filled = Math.min(e.filled, e.qty);
+  const fillPct = Math.min(100, Math.round((filled / e.qty) * 100));
+  const avgPrice = filled > 0 ? (e.notionalTick / filled) * TICK_SIZE : null;
+  const arrival = e.arrivalMid;
+  // Read the end mid from a FRESH snapshot: a synchronous Market run finalizes before the
+  // next render refreshes lastMidPrice, so the child's own impact would otherwise be missed.
+  const endMid = toPrice(sim.snapshot(1).midTick) ?? lastMidPrice;
+  const sideSign = e.side === 0 ? -1 : 1; // buy: paying above arrival is a cost
+  const slipBps = avgPrice !== null && arrival > 0 ? sideSign * ((avgPrice - arrival) / arrival) * 1e4 : null;
+  const midDeltaBps = arrival > 0 ? ((endMid - arrival) / arrival) * 1e4 : 0; // raw signed mid move
+  const durS = (performance.now() - e.startT) / 1000;
+  const names: Record<string, string> = { market: "Market", twap: "TWAP", passive: "Passive" };
+  const bp = (v: number | null) => (v === null ? "—" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1));
+  const cls = (v: number | null) => (v === null ? "" : v >= 0.05 ? "pos" : v <= -0.05 ? "neg" : "");
+  const row =
+    `<tr>` +
+    `<td class="algo">${names[e.algo]}</td>` +
+    `<td class="dimc">${e.side ? "sell" : "buy"} ${fmtN(e.qty)}</td>` +
+    `<td class="num">${avgPrice !== null ? avgPrice.toFixed(2) : "—"}</td>` +
+    `<td class="num ${cls(slipBps)}">${bp(slipBps)}</td>` +
+    `<td class="num">${fillPct}%</td>` +
+    `<td class="num dimc">${bp(midDeltaBps)}</td>` +
+    `<td class="num dimc">${durS.toFixed(1)}s</td>` +
+    `</tr>`;
+  execHistory.unshift(row);
+  if (execHistory.length > 8) execHistory.pop();
+  $("execRows").innerHTML = execHistory.join("");
+}
+function cancelExec() {
+  if (!exec) return;
+  if (exec.passiveId != null) sim.cancelOrder(exec.passiveId);
+  finalizeExec();
+}
+function wireExec() {
+  setExecSide(execSideV);
+  $("execSide")
+    .querySelectorAll("button")
+    .forEach((b) => b.addEventListener("click", () => setExecSide(+(b.dataset.v || 0))));
+  const algoEl = $<HTMLSelectElement>("execAlgo");
+  const syncAlgoFields = () => {
+    const a = algoEl.value;
+    document.querySelectorAll<HTMLElement>(".exec-twap").forEach((el) => (el.style.display = a === "twap" ? "" : "none"));
+    document
+      .querySelectorAll<HTMLElement>(".exec-horizon")
+      .forEach((el) => (el.style.display = a === "twap" || a === "passive" ? "" : "none"));
+  };
+  algoEl.onchange = syncAlgoFields;
+  syncAlgoFields();
+  $<HTMLFormElement>("execForm").onsubmit = (e) => {
+    e.preventDefault();
+    startExec();
+  };
+  $("execCancel").onclick = cancelExec;
+}
+
+// ---- market maker -----------------------------------------------------------
+const MMHIST = 300;
+const mmHist: number[] = []; // PnL ($) over time
+let mmLastSampleT = 0;
+let mmSpark: HTMLCanvasElement;
+let mmCtx: CanvasRenderingContext2D | null = null;
+let mmOn = false;
+
+function wireMaker() {
+  const toggle = $("mmToggle");
+  toggle.onclick = () => {
+    mmOn = !mmOn;
+    sim.mmEnable(mmOn);
+    toggle.textContent = mmOn ? "stop quoting" : "start quoting";
+    toggle.setAttribute("aria-pressed", mmOn ? "true" : "false");
+  };
+  const cfg = () =>
+    sim.mmConfig(readIntInput("mmHalf") ?? 1, readIntInput("mmSize") ?? 200, readIntInput("mmInv") ?? 2000);
+  ["mmHalf", "mmSize", "mmInv"].forEach((id) => $(id).addEventListener("input", cfg));
+  cfg();
+  $("mmFlat").onclick = () => {
+    sim.mmFlatten();
+    mmHist.length = 0;
+  };
+  mmSpark = $<HTMLCanvasElement>("mmChart");
+  mmCtx = mmSpark.getContext("2d");
+  sizeMm();
+  window.addEventListener("resize", sizeMm);
+}
+function sizeMm() {
+  if (!mmCtx) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const r = mmSpark.getBoundingClientRect();
+  const w = Math.max(1, Math.round(r.width));
+  const h = Math.max(1, Math.round(r.height));
+  mmSpark.width = Math.round(w * dpr);
+  mmSpark.height = Math.round(h * dpr);
+  mmCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function updateMaker(snap: any) {
+  const mm = snap.mm;
+  if (!mm) return;
+  const pnl = mm.pnlTick * TICK_SIZE;
+  setMoney($("mmPnl"), pnl);
+  setMoney($("mmReal"), mm.spreadTick * TICK_SIZE); // spread capture
+  setMoney($("mmUnreal"), mm.adverseTick * TICK_SIZE); // inventory / adverse selection
+  const inv = mm.inv as number;
+  const invEl = $("mmInvv");
+  invEl.textContent = fmtN(inv);
+  invEl.className = "mono " + (inv > 0 ? "pos" : inv < 0 ? "neg" : "");
+  $("mmQuotes").textContent = `${mm.bidPx >= 0 ? fmtP(mm.bidPx) : "—"} / ${mm.askPx >= 0 ? fmtP(mm.askPx) : "—"}`;
+  $("mmFills").textContent = fmtN(mm.fills);
+
+  const frac = mm.invLimit > 0 ? Math.max(-1, Math.min(1, inv / mm.invLimit)) : 0;
+  const fill = $("mmInvFill");
+  fill.classList.toggle("short", frac < 0);
+  fill.style.transform = `scaleX(${Math.abs(frac)})`;
+  fill.style.background = frac >= 0 ? "var(--bid)" : "var(--ask)";
+
+  const now = performance.now();
+  if (now - mmLastSampleT >= SAMPLE_MS) {
+    mmLastSampleT = now;
+    mmHist.push(pnl);
+    if (mmHist.length > MMHIST) mmHist.shift();
+  }
+  if (activePanel === "maker") drawMm();
+}
+function drawMm() {
+  if (!mmCtx || mmHist.length < 2) return;
+  const c = mmCtx;
+  const w = mmSpark.getBoundingClientRect().width;
+  const h = mmSpark.getBoundingClientRect().height;
+  c.clearRect(0, 0, w, h);
+  let lo = 0,
+    hi = 0;
+  for (const v of mmHist) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const pad = Math.max((hi - lo) * 0.12, 0.5);
+  lo -= pad;
+  hi += pad;
+  const span = hi - lo || 1;
+  const x = (i: number) => (i / (MMHIST - 1)) * w;
+  const y = (v: number) => h - 3 - ((v - lo) / span) * (h - 6);
+  const n = mmHist.length;
+  const off = MMHIST - n;
+  // zero line
+  c.strokeStyle = css("--line");
+  c.lineWidth = 1;
+  c.beginPath();
+  c.moveTo(0, y(0));
+  c.lineTo(w, y(0));
+  c.stroke();
+  // pnl line, colored by sign of the latest value
+  const up = mmHist[n - 1] >= 0;
+  c.beginPath();
+  for (let i = 0; i < n; i++) {
+    const px = x(off + i);
+    const py = y(mmHist[i]);
+    i === 0 ? c.moveTo(px, py) : c.lineTo(px, py);
+  }
+  c.strokeStyle = up ? css("--bid") : css("--ask");
+  c.lineWidth = 1.5;
+  c.lineJoin = "round";
+  c.stroke();
+}
+
+boot()
+  .then(() => {
+    wireTabs();
+    wireExec();
+    wireMaker();
+  })
+  .catch((err) => {
+    const b = document.getElementById("boot");
+    if (b) b.textContent = "failed to load the engine: " + err;
+  });
