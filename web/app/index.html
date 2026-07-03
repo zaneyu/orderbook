@@ -30,6 +30,15 @@
         <div class="q"><span class="lbl">bid</span><b id="bid" class="bidc">—</b></div>
         <div class="q"><span class="lbl">ask</span><b id="ask" class="askc">—</b></div>
         <div class="q"><span class="lbl">spread</span><b id="spread">—</b></div>
+        <div class="q regime"><span class="lbl">regime</span><b id="regime" class="flat">—</b></div>
+        <div class="q vol">
+          <span class="lbl">volatility</span>
+          <span class="volmeter"><i id="volfill"></i></span>
+        </div>
+      </section>
+
+      <section class="panel chart" aria-hidden="true">
+        <canvas id="spark"></canvas>
       </section>
 
       <section class="grid">
@@ -54,6 +63,13 @@
             <input id="speed" type="range" min="0" max="1200" step="50" value="250" />
             <span id="speedv" class="mono">250</span>/frame
           </label>
+          <div class="events">
+            <button id="bull" type="button" class="btn ev up" title="bullish news shock">▲ news</button>
+            <button id="bear" type="button" class="btn ev down" title="bearish news shock">▼ news</button>
+            <label class="turb">turbulence
+              <input id="turb" type="range" min="0" max="100" step="1" value="20" />
+            </label>
+          </div>
         </div>
         <form id="order" class="row2">
           <div class="seg" id="sideSeg">
@@ -71,9 +87,16 @@
           <button type="submit" class="btn primary">submit</button>
           <span id="fillmsg" class="fillmsg"></span>
         </form>
+
+        <div id="myorders" class="myorders" hidden>
+          <div class="mo-hdr">your working orders</div>
+          <div id="molist" class="mo-list"></div>
+        </div>
+
         <p class="hint">
-          Click a ladder level to rest an order there (bid side buys, ask side sells) ·
-          hover for cumulative depth · <kbd>space</kbd> pauses
+          Click a ladder level to rest an order (bid side buys, ask side sells) · your fills
+          push the price (market impact) · fire a <b>news</b> shock or turn up
+          <b>turbulence</b> · <kbd>space</kbd> pauses
         </p>
       </section>
 

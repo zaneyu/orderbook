@@ -100,6 +100,10 @@ async function boot() {
 
   askRows = buildRows($("asks"), "ask");
   bidRows = buildRows($("bids"), "bid");
+  spark = $<HTMLCanvasElement>("spark");
+  sctx = spark.getContext("2d")!;
+  sizeSpark();
+  window.addEventListener("resize", sizeSpark);
   wireControls();
   wireLadder();
 
@@ -156,6 +160,9 @@ function render(snap: any) {
   }
   $("tape").innerHTML = html;
 
+  updateMarketState(snap);
+  renderMine(snap);
+
   $("trades").textContent = fmtN(snap.trades);
   $("resting").textContent = fmtN(snap.resting);
   const now = performance.now();
@@ -166,6 +173,154 @@ function render(snap: any) {
   }
 
   if (hoverIdx >= 0) refreshCum(); // keep cumulative highlight live under a held cursor
+}
+
+// ---- your working orders: track each user limit order over its life ---------
+type Mine = { side: number; price: number; orig: number; filled: number; avgTick: number; done: boolean };
+const mineFilled = new Map<string, number>(); // key -> last filled, to flash on a new fill
+
+function renderMine(snap: any) {
+  const mine: Mine[] = snap.mine || [];
+  const box = $("myorders");
+  if (!mine.length) {
+    if (!box.hidden) box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const mid = toPrice(snap.midTick);
+  let html = "";
+  const seen = new Set<string>();
+  for (let i = 0; i < mine.length; i++) {
+    const o = mine[i];
+    const key = `${o.side}:${o.price}:${o.orig}:${i}`;
+    seen.add(key);
+    const dir = o.side === 0 ? 1 : -1;
+    const avg = o.avgTick >= 0 ? toPrice(o.avgTick) : null;
+    const pnl = avg !== null && mid !== null && o.filled > 0 ? (mid - avg) * o.filled * dir : null;
+    const pcls = pnl === null ? "" : pnl > 0.0005 ? "up" : pnl < -0.0005 ? "down" : "";
+    const pct = Math.round((o.filled / o.orig) * 100);
+    const status = o.done ? "filled" : o.filled > 0 ? `${pct}% working` : "resting";
+    const flash = mineFilled.has(key) && (mineFilled.get(key) as number) < o.filled ? " hit" : "";
+    mineFilled.set(key, o.filled);
+    html +=
+      `<div class="mo ${o.side === 0 ? "buy" : "sell"}${o.done ? " done" : ""}${flash}">` +
+      `<span class="mo-side">${o.side === 0 ? "BUY" : "SELL"}</span>` +
+      `<span class="mo-qty mono">${fmtN(o.filled)}/${fmtN(o.orig)}</span>` +
+      `<span class="mo-at mono">@ ${fmtP(o.price)}</span>` +
+      `<span class="mo-avg mono">avg ${avg !== null ? avg.toFixed(2) : "—"}</span>` +
+      `<span class="mo-pnl mono ${pcls}">${pnl === null ? "" : (pnl >= 0 ? "+" : "") + pnl.toFixed(2)}</span>` +
+      `<span class="mo-status">${status}</span>` +
+      `<i class="mo-bar" style="transform:scaleX(${o.filled / o.orig})"></i>` +
+      `</div>`;
+  }
+  for (const k of mineFilled.keys()) if (!seen.has(k)) mineFilled.delete(k);
+  $("molist").innerHTML = html;
+}
+
+// ---- market state: regime badge, volatility meter, live price chart ---------
+const HIST = 260;
+const hist: number[] = []; // recent mid, in price
+let spark: HTMLCanvasElement;
+let sctx: CanvasRenderingContext2D;
+let sw = 0;
+let sh = 0;
+
+function sizeSpark() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const r = spark.getBoundingClientRect();
+  sw = Math.max(1, Math.round(r.width));
+  sh = Math.max(1, Math.round(r.height));
+  spark.width = Math.round(sw * dpr);
+  spark.height = Math.round(sh * dpr);
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function css(name: string) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function updateMarketState(snap: any) {
+  const mid = toPrice(snap.midTick);
+  if (mid !== null) {
+    hist.push(mid);
+    if (hist.length > HIST) hist.shift();
+  }
+
+  const trend = snap.trend as number; // -1..1
+  const vol01 = snap.vol01 as number; // 0..1
+  const reg = $("regime");
+  let label: string, cls: string;
+  if (trend > 0.18) {
+    label = "trending up";
+    cls = "up";
+  } else if (trend < -0.18) {
+    label = "trending down";
+    cls = "down";
+  } else {
+    label = "ranging";
+    cls = "flat";
+  }
+  if (vol01 > 0.62) label += " · volatile";
+  reg.textContent = label;
+  reg.className = cls;
+
+  $("volfill").style.transform = `scaleX(${Math.max(0.02, vol01)})`;
+  $("volfill").className = vol01 > 0.62 ? "hot" : "";
+
+  drawSpark(trend);
+}
+
+function drawSpark(trend: number) {
+  if (!sctx || hist.length < 2) return;
+  sctx.clearRect(0, 0, sw, sh);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of hist) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const pad = Math.max((hi - lo) * 0.12, 0.02);
+  lo -= pad;
+  hi += pad;
+  const span = hi - lo || 1;
+  const padX = 1;
+  const x = (i: number) => padX + (i / (HIST - 1)) * (sw - 2 * padX);
+  const y = (v: number) => sh - 4 - ((v - lo) / span) * (sh - 8);
+  const n = hist.length;
+  const off = HIST - n; // right-align the newest sample
+
+  const line = trend > 0.18 ? css("--bid") : trend < -0.18 ? css("--ask") : css("--amber");
+
+  // faint area fill under the line
+  sctx.beginPath();
+  sctx.moveTo(x(off), sh);
+  for (let i = 0; i < n; i++) sctx.lineTo(x(off + i), y(hist[i]));
+  sctx.lineTo(x(off + n - 1), sh);
+  sctx.closePath();
+  sctx.fillStyle = line;
+  sctx.globalAlpha = 0.07;
+  sctx.fill();
+  sctx.globalAlpha = 1;
+
+  // the price line
+  sctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const px = x(off + i);
+    const py = y(hist[i]);
+    i === 0 ? sctx.moveTo(px, py) : sctx.lineTo(px, py);
+  }
+  sctx.lineWidth = 1.5;
+  sctx.strokeStyle = line;
+  sctx.lineJoin = "round";
+  sctx.stroke();
+
+  // marker on the latest price
+  const lx = x(off + n - 1);
+  const ly = y(hist[n - 1]);
+  sctx.beginPath();
+  sctx.arc(lx, ly, 2.2, 0, Math.PI * 2);
+  sctx.fillStyle = line;
+  sctx.fill();
 }
 
 // ---- direct ladder interaction ---------------------------------------------
@@ -251,7 +406,22 @@ function wireControls() {
   $("reset").onclick = () => {
     sim.reset();
     prevLast = -1;
+    hist.length = 0;
+    mineFilled.clear();
   };
+
+  $("bull").onclick = () => {
+    sim.news(1);
+    showFill("bullish news shock — fair value jumps up");
+  };
+  $("bear").onclick = () => {
+    sim.news(-1);
+    showFill("bearish news shock — fair value jumps down");
+  };
+  const turbEl = $<HTMLInputElement>("turb");
+  const applyTurb = () => sim.setTurbulence(+turbEl.value / 100);
+  turbEl.oninput = applyTurb;
+  applyTurb();
   const speedEl = $<HTMLInputElement>("speed");
   speed = +speedEl.value;
   $("speedv").textContent = String(speed);

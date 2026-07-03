@@ -5,8 +5,10 @@
 fuzzing.
 
 **▶ Live demo: https://orderbook.pages.dev** — the same engine compiled to WebAssembly,
-matching a simulated market in your browser (hover the depth, click a level to trade into
-it). Source in [`web/`](web/).
+matching a simulated market in your browser. The price process is a real one (stochastic
+volatility, trends, fat-tailed news jumps); fire a news shock, turn up turbulence, click a
+level to trade (your fills move the price), and watch your working orders fill. Source in
+[`web/`](web/).
 
 ## Latency
 

@@ -106,6 +106,36 @@ body {
 .bidc { color: var(--bid); }
 .askc { color: var(--ask); }
 
+/* regime + volatility live off the same quote row */
+.q.regime b, .q.vol { justify-content: flex-end; }
+.q.regime b { font-size: 14px; letter-spacing: 0.01em; }
+.q.regime b.up { color: var(--bid); }
+.q.regime b.down { color: var(--ask); }
+.q.regime b.flat { color: var(--dim); }
+.q.vol { display: flex; flex-direction: column; gap: 4px; }
+.volmeter {
+  width: clamp(72px, 12vw, 120px);
+  height: 8px;
+  border-radius: 5px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+.volmeter i {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform-origin: left center;
+  transform: scaleX(0.2);
+  background: var(--amber-dim);
+  border-radius: 5px;
+  transition: transform 0.3s var(--ease), background 0.3s var(--ease);
+}
+.volmeter i.hot { background: var(--ask); }
+
+/* ---------------------------------------------------------------- price chart */
+.chart { padding: 0; }
+.chart canvas { display: block; width: 100%; height: 72px; }
+
 /* ---------------------------------------------------------------- grid */
 .grid {
   display: grid;
@@ -168,6 +198,7 @@ body {
   font-family: var(--mono);
   font-size: 13px;
   cursor: pointer;
+  user-select: none;   /* clicking to trade shouldn't select the price text */
 }
 .lrow.empty { cursor: default; }
 .lrow:not(.empty):hover { background: rgba(239, 233, 221, 0.05); }
@@ -255,6 +286,14 @@ body {
 .speed { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; }
 input[type="range"] { accent-color: var(--amber); cursor: pointer; }
 
+/* market-event cluster: news shocks + turbulence dial */
+.events { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+.btn.ev { padding: 9px 12px; font-size: 12px; }
+.btn.ev.up:hover { border-color: var(--bid); color: var(--bid); }
+.btn.ev.down:hover { border-color: var(--ask); color: var(--ask); }
+.turb { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; }
+.turb input[type="range"] { width: 96px; }
+
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .seg button {
   font-family: var(--mono); font-size: 13px; color: var(--dim);
@@ -282,6 +321,42 @@ input.in { width: 92px; }
 }
 .fillmsg { font-family: var(--mono); font-size: 12px; color: var(--dim); min-height: 1em; }
 .fillmsg.show { color: var(--amber); }
+
+/* ---- your working orders ---- */
+.myorders { display: flex; flex-direction: column; gap: 6px; }
+.mo-hdr {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--dim);
+}
+.mo-list { display: flex; flex-direction: column; gap: 5px; }
+.mo {
+  position: relative;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: var(--mono); font-size: 12.5px;
+  overflow: hidden;
+}
+.mo-side { font-weight: 600; letter-spacing: 0.04em; }
+.mo.buy .mo-side { color: var(--bid); }
+.mo.sell .mo-side { color: var(--ask); }
+.mo-at, .mo-avg { color: var(--dim); }
+.mo-pnl { margin-left: auto; font-weight: 600; }
+.mo-pnl.up { color: var(--bid); }
+.mo-pnl.down { color: var(--ask); }
+.mo-status { color: var(--dim); min-width: 88px; text-align: right; }
+.mo.done { opacity: 0.62; }
+.mo.done .mo-status { color: var(--bid); }
+.mo-bar {
+  position: absolute; left: 0; bottom: 0; height: 2px; width: 100%;
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform 0.25s var(--ease);
+}
+.mo.buy .mo-bar { background: var(--bid); }
+.mo.sell .mo-bar { background: var(--ask); }
+.mo.hit { animation: mohit 0.4s var(--ease); }
+@keyframes mohit { from { background: var(--flash); } to { background: var(--panel-2); } }
 
 /* ---------------------------------------------------------------- footer */
 .stats {

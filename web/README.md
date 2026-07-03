@@ -1,9 +1,17 @@
 # orderbook — live web visualizer
 
 The **real C++ matching engine, compiled to WebAssembly**, matching a simulated market
-in the browser: a live L2 depth ladder, time-and-sales tape, and manual order entry
-(limit / market / IOC / FOK). `sim.cpp` binds the same `ob::OrderBook` the tests and
-benchmarks use via Embind; there is no JavaScript reimplementation.
+in the browser: a live L2 depth ladder, a price chart, time-and-sales tape, and manual
+order entry (limit / market / IOC / FOK). `sim.cpp` binds the same `ob::OrderBook` the
+tests and benchmarks use via Embind; there is no JavaScript reimplementation.
+
+The market is a small but genuine price process, not a flat random walk: **stochastic
+volatility** (turbulence clusters), a persistent **momentum/trend** regime, fat-tailed
+**news jumps**, order flow that leans with the trend, and spreads that widen in
+turbulence. You can fire a bullish/bearish **news shock**, turn the **turbulence** dial,
+and your own aggressive orders exert **market impact** (fills push the price). Submit a
+limit order and the **working-orders** panel tracks it over its life: fills as market
+flow reaches it, average price, and live mark-to-market P&L.
 
 ## Run it
 
@@ -13,8 +21,9 @@ npm install
 npm run dev          # or: npm run build && npm run preview
 ```
 
-Open the printed URL. The engine steps a market maker + noise-trader flow each frame;
-Pause/Play, drag speed, or submit your own orders and watch them hit the book.
+Open the printed URL. The engine steps the simulated flow each frame; Pause/Play, drag
+speed, fire news shocks, turn up turbulence, click a ladder level to rest an order, or
+submit from the form and watch your working orders fill.
 
 ## Rebuild the WASM (only if the engine or bindings change)
 
