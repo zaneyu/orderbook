@@ -91,6 +91,7 @@ let stepAccum = 0;
 let rateT = performance.now();
 let reduceMotion = false;
 let side = 0; // 0 buy, 1 sell
+let priceDirty = false; // once the user edits the price, stop auto-tracking the mid (WYSIWYG)
 
 async function boot() {
   const obUrl = new URL("ob.js", document.baseURI).href;
@@ -143,8 +144,10 @@ function render(snap: any) {
   $("spread").textContent = sp === null ? "—" : sp.toFixed(2);
   $("midtxt").textContent = sp === null ? "" : `spread ${sp.toFixed(2)}`;
 
+  // Track the live mid ONLY until the user takes over the field. Never overwrite a
+  // price the user typed — doing so once turned a "sell @ 120" into a market sell.
   const priceEl = $<HTMLInputElement>("price");
-  if (document.activeElement !== priceEl && !priceEl.disabled) {
+  if (!priceDirty && document.activeElement !== priceEl && !priceEl.disabled) {
     const midTick =
       snap.bestBid >= 0 && snap.bestAsk >= 0 ? Math.round((snap.bestBid + snap.bestAsk) / 2) : MIDTICK;
     priceEl.value = fmtP(midTick);
@@ -439,15 +442,23 @@ function wireControls() {
   typeEl.onchange = () => {
     priceEl.disabled = typeEl.value === "1"; // market ignores price (CSS greys :disabled)
   };
+  // Editing the price takes it out of auto-track; clearing it hands tracking back.
+  priceEl.addEventListener("input", () => {
+    priceDirty = priceEl.value.trim() !== "";
+  });
 
   $<HTMLFormElement>("order").onsubmit = (e) => {
     e.preventDefault();
     const type = +typeEl.value;
     const qty = Math.max(1, parseInt($<HTMLInputElement>("qty").value) || 0);
-    const tick = toTick(parseFloat(priceEl.value) || 100);
+    const typed = parseFloat(priceEl.value) || 100;
+    const tick = toTick(typed);
+    const eff = toPrice(tick); // what the book actually used, after clamping to a valid tick
     const res = sim.submit(type, side, tick, qty);
     const names = ["limit", "market", "IOC", "FOK"];
-    showFill(`${names[type]} ${side ? "sell" : "buy"} ${qty} → filled ${res.filled}, resting ${res.resting}`);
+    const at = type === 1 ? "" : ` @ ${fmtP(tick)}`;
+    const clamped = type !== 1 && eff !== null && Math.abs(eff - typed) > 0.005 ? ` (clamped from ${typed.toFixed(2)})` : "";
+    showFill(`${names[type]} ${side ? "sell" : "buy"} ${qty}${at}${clamped} → filled ${res.filled}, resting ${res.resting}`);
   };
 
   // spacebar toggles the simulation (unless typing in a field)
