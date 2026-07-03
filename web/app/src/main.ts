@@ -27,6 +27,8 @@ type Row = {
   p: HTMLElement;
   z: HTMLElement;
   bar: HTMLElement;
+  mk: HTMLElement;
+  mkClass: string;
   last: number;
   side: "ask" | "bid";
   tick: number;
@@ -37,6 +39,8 @@ let askRows: Row[] = [];
 let bidRows: Row[] = [];
 let lastAsks: [number, number][] = [];
 let lastBids: [number, number][] = [];
+// tick -> owner marker ("mm" = the market maker's quote, "you" = your resting order)
+const orderMarks = new Map<number, string>();
 
 function buildRows(host: HTMLElement, side: "ask" | "bid"): Row[] {
   const rows: Row[] = [];
@@ -50,9 +54,11 @@ function buildRows(host: HTMLElement, side: "ask" | "bid"): Row[] {
     z.className = "lz";
     const bar = document.createElement("i");
     bar.className = "lbar";
-    el.append(p, z, bar);
+    const mk = document.createElement("i");
+    mk.className = "lmark";
+    el.append(p, z, bar, mk);
     host.appendChild(el);
-    const row: Row = { el, p, z, bar, last: -1, side, tick: -1, idx: -1 };
+    const row: Row = { el, p, z, bar, mk, mkClass: "lmark", last: -1, side, tick: -1, idx: -1 };
     (el as any)._row = row;
     rows.push(row);
   }
@@ -70,6 +76,7 @@ function paint(row: Row, level: [number, number] | null, idx: number, max: numbe
       row.p.textContent = "";
       row.z.textContent = "";
       row.bar.style.transform = "scaleX(0)";
+      if (row.mkClass !== "lmark") { row.mk.className = row.mkClass = "lmark"; }
       row.last = -1;
     }
     return;
@@ -78,9 +85,14 @@ function paint(row: Row, level: [number, number] | null, idx: number, max: numbe
   row.tick = tick;
   row.el.classList.remove("empty");
   row.el.tabIndex = 0;
+  const owner = orderMarks.get(tick); // "mm" or "you" if a bot/you rest here
+  const mkClass = owner ? `lmark ${owner}` : "lmark";
+  if (mkClass !== row.mkClass) { row.mk.className = row.mkClass = mkClass; }
   row.el.setAttribute(
     "aria-label",
-    `${row.side === "bid" ? "bid" : "ask"} ${fmtP(tick)}, size ${fmtN(qty)}, ${row.side === "bid" ? "buy" : "sell"} here`,
+    `${row.side === "bid" ? "bid" : "ask"} ${fmtP(tick)}, size ${fmtN(qty)}` +
+      (owner === "mm" ? ", market maker quote" : owner === "you" ? ", your order" : "") +
+      `, ${row.side === "bid" ? "buy" : "sell"} here`,
   );
   row.p.textContent = fmtP(tick);
   row.z.textContent = fmtN(qty);
@@ -149,6 +161,15 @@ function render(snap: any) {
   let max = 1;
   for (const [, q] of lastAsks) max = Math.max(max, q);
   for (const [, q] of lastBids) max = Math.max(max, q);
+
+  // mark which visible levels hold the market maker's quotes or your own resting orders
+  orderMarks.clear();
+  const mm = snap.mm;
+  if (mm && mm.on) {
+    if (mm.bidPx >= 0) orderMarks.set(mm.bidPx, "mm");
+    if (mm.askPx >= 0) orderMarks.set(mm.askPx, "mm");
+  }
+  for (const o of (snap.mine as any[]) ?? []) if (!o.done && o.filled < o.orig) orderMarks.set(o.price, "you");
 
   for (let i = 0; i < DEPTH; i++) paint(askRows[DEPTH - 1 - i], lastAsks[i] ?? null, i, max, !reduceMotion);
   for (let i = 0; i < DEPTH; i++) paint(bidRows[i], lastBids[i] ?? null, i, max, !reduceMotion);

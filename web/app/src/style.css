@@ -237,6 +237,18 @@ body {
 }
 .lrow.ask .lbar { background: var(--ask-bar); }
 .lrow.bid .lbar { background: var(--bid-bar); }
+/* owner marker: a small dot in the left gutter for the maker's quotes / your orders */
+.lrow .lmark {
+  position: absolute;
+  left: 5px; top: 50%;
+  width: 5px; height: 5px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  opacity: 0;
+  z-index: 2;
+}
+.lrow .lmark.mm { opacity: 1; background: var(--amber); }
+.lrow .lmark.you { opacity: 1; background: var(--text); box-shadow: 0 0 0 1px var(--ink); }
 .lrow.empty { opacity: 0.25; }
 .lrow.empty .lz { color: var(--dim); }
 .lrow.flash::after {
@@ -262,6 +274,19 @@ body {
   color: var(--amber);
   letter-spacing: 0.02em;
 }
+.lgnd {
+  display: flex;
+  gap: 16px;
+  padding: 7px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 10.5px;
+  color: var(--dim);
+  font-family: var(--mono);
+}
+.lgnd span { display: inline-flex; align-items: center; gap: 6px; }
+.lgnd .dot { width: 6px; height: 6px; border-radius: 50%; }
+.lgnd .dot.mm { background: var(--amber); }
+.lgnd .dot.you { background: var(--text); }
 
 /* ---- tape ---- */
 .tape .rows { overflow: hidden; }
@@ -487,6 +512,14 @@ b.neg { color: var(--ask); }
   .grid { grid-template-columns: 1fr; }
   .tape { max-height: 220px; }
   .stats .dim { margin-left: 0; flex-basis: 100%; }
+}
+
+@media (max-width: 560px) {
+  /* strategy cards: drop the one-line description, let name + P&L + position breathe */
+  .strat { grid-template-columns: auto 1fr auto; gap: 6px 12px; padding: 9px 10px; }
+  .strat-id span { display: none; }
+  .strat-sig { grid-column: 2 / -1; flex-direction: row; align-items: center; gap: 8px; text-align: left; }
+  .strat-extra, .strat-cfg { grid-column: 1 / -1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
