@@ -104,6 +104,36 @@ body {
 }
 .repo:hover { color: var(--amber); }
 
+/* ---------------------------------------------------------------- intro */
+.intro {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  background: rgba(242, 181, 74, 0.07);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+.intro b { color: var(--text); font-weight: 600; }
+.intro-x {
+  margin-left: auto;
+  flex: none;
+  background: none;
+  border: 0;
+  color: var(--dim);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 6px;
+  transition: color 0.16s var(--ease);
+}
+.intro-x:hover { color: var(--text); }
+.intro-x:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
 /* ---------------------------------------------------------------- quote */
 .quote {
   display: flex;

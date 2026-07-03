@@ -969,11 +969,30 @@ function drawStrats(snap: any) {
   }
 }
 
+function wireIntro() {
+  const intro = $("intro");
+  try {
+    if (localStorage.getItem("ob_intro_dismissed") === "1") return;
+  } catch {
+    /* storage blocked (private mode) — just show it this session */
+  }
+  intro.hidden = false;
+  $("introX").onclick = () => {
+    intro.hidden = true;
+    try {
+      localStorage.setItem("ob_intro_dismissed", "1");
+    } catch {
+      /* ignore */
+    }
+  };
+}
+
 boot()
   .then(() => {
     wireTabs();
     wireExec();
     wireStrats();
+    wireIntro();
   })
   .catch((err) => {
     const b = document.getElementById("boot");
