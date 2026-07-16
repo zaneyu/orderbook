@@ -3,6 +3,7 @@
    bids below) so meaning never rests on colour alone. Amber = brand accent. */
 
 :root {
+  color-scheme: dark;    /* native widgets (select, scrollbars) match the dark theme */
   --ink: #14110d;        /* warm near-black */
   --panel: #1a160f;
   --panel-2: #201b13;

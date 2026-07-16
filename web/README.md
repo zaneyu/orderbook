@@ -28,18 +28,26 @@ submit from the form and watch your working orders fill.
 Two applications are built on the same engine, in tabs:
 
 - **Execution & TCA** — work a parent order through the live book via *Market now*,
-  *TWAP* (sliced over a horizon), or *Passive limit*, and measure the realized average
-  price vs the arrival mid (slippage, in bps), fill rate, and the mid move over the
-  window. Run the same order a few times to compare strategies — the best-execution
-  trade-off, measured the way a desk measures it.
+  *TWAP* (sliced over a horizon, remainder distributed across slices), or *Passive
+  limit*, and measure **implementation shortfall** vs the arrival mid (bps, positive =
+  cost, desk convention). The unfilled remainder is marked at the end mid, so a passive
+  order that misses its fill pays for the move away instead of the adverse outcome
+  silently vanishing — no fill-selection bias. Fill rate and the side-adjusted mid move
+  round it out. Run the same order a few times to compare strategies — the
+  best-execution trade-off, measured the way a desk measures it.
 - **Strategies** — three autonomous bots that trade the same live book, with live PnL:
-  a **market maker** (inventory-skewed Avellaneda–Stoikov quotes, PnL split into spread
-  capture vs adverse selection), a **momentum** bot (buys strength, sells weakness), and
-  a **mean-reversion** bot (fades moves back to the mean). Market-scenario presets (calm /
-  trending / choppy / volatile / flash crash) let you watch which style wins by regime —
-  momentum in trends, mean reversion in choppy markets. The bots trade only on the
-  observable mid, and the price process itself becomes mean-reverting in the choppy
-  regime, so the edge is real, not an oracle.
+  a **market maker** quoting genuine **Avellaneda–Stoikov** (reservation price
+  r = m − q·γ·σ²·τ, half-spread δ = γσ²τ/2 + (1/γ)·ln(1+γ/κ), clamped to a demo-sane
+  tick budget — so its spread *widens in turbulence* and shades with inventory; PnL
+  split into spread capture vs adverse selection against one observable benchmark), a
+  **momentum** bot (buys strength, sells weakness), and a **mean-reversion** bot (fades
+  moves back to the mean). Market-scenario presets (calm / trending / choppy / volatile /
+  flash crash) let you watch which style wins by regime — momentum in trends, mean
+  reversion in choppy markets. **No bot sees the simulator's latent fair value** — the
+  maker quotes off the book mid with its own quotes pulled and estimates volatility from
+  observed mid changes, and it requotes at the END of each frame, so a news jump or
+  informed flow can genuinely pick off its stale quotes, exactly like a real quoter.
+  (No fees/rebates are modelled; spread-capture economics are gross.)
 
 ## Rebuild the WASM (only if the engine or bindings change)
 

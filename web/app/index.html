@@ -68,7 +68,7 @@
 
       <section class="controls">
         <div class="row1">
-          <button id="play" class="btn primary">❚❚ pause</button>
+          <button id="play" class="btn primary">Pause</button>
           <button id="reset" class="btn">reset</button>
           <label class="speed">activity
             <input id="speed" type="range" min="0" max="1200" step="30" value="120" />
@@ -142,17 +142,19 @@
             <table class="exec-table">
               <thead><tr>
                 <th scope="col">strategy</th><th scope="col">order</th><th scope="col" class="num">avg px</th>
-                <th scope="col" class="num">slippage</th><th scope="col" class="num">fill</th>
-                <th scope="col" class="num">mid Δ</th><th scope="col" class="num">time</th>
+                <th scope="col" class="num">shortfall</th><th scope="col" class="num">fill</th>
+                <th scope="col" class="num">adv move</th><th scope="col" class="num">time</th>
               </tr></thead>
               <tbody id="execRows"></tbody>
             </table>
           </div>
           <p class="hint">
-            Work a parent order through the live book. <b>Slippage</b> is the realized average
-            price vs the mid at arrival (negative = a cost); <b>mid Δ</b> is how far the mid
-            moved over the fill window (your impact plus market drift). Run the same order a
-            few times to compare strategies.
+            Work a parent order through the live book. <b>Shortfall</b> is implementation
+            shortfall vs the mid at arrival, in bps (positive = a cost) — unfilled shares are
+            marked at the end mid, so a passive order that misses its fill pays for the move
+            away instead of showing a free pass. <b>adv move</b> is how far the mid moved
+            against your side over the run (your impact plus market drift — one run is mostly
+            noise). Run the same order a few times to compare strategies.
           </p>
         </div>
 

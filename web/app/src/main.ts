@@ -82,18 +82,24 @@ function paint(row: Row, level: [number, number] | null, idx: number, max: numbe
     return;
   }
   const [tick, qty] = level;
+  const tickChanged = row.tick !== tick;
   row.tick = tick;
   row.el.classList.remove("empty");
-  row.el.tabIndex = 0;
+  if (row.el.tabIndex !== 0) row.el.tabIndex = 0;
   const owner = orderMarks.get(tick); // "mm" or "you" if a bot/you rest here
   const mkClass = owner ? `lmark ${owner}` : "lmark";
-  if (mkClass !== row.mkClass) { row.mk.className = row.mkClass = mkClass; }
-  row.el.setAttribute(
-    "aria-label",
-    `${row.side === "bid" ? "bid" : "ask"} ${fmtP(tick)}, size ${fmtN(qty)}` +
-      (owner === "mm" ? ", market maker quote" : owner === "you" ? ", your order" : "") +
-      `, ${row.side === "bid" ? "buy" : "sell"} here`,
-  );
+  const ownerChanged = mkClass !== row.mkClass;
+  if (ownerChanged) { row.mk.className = row.mkClass = mkClass; }
+  // Rewrite the label only when the level/owner changed or the row is focused (a screen
+  // reader needs fresh size there) — rebuilding 22 labels per frame sprays mutations at
+  // assistive tech ~60x/s for sizes nobody is reading.
+  if (tickChanged || ownerChanged || document.activeElement === row.el)
+    row.el.setAttribute(
+      "aria-label",
+      `${row.side === "bid" ? "bid" : "ask"} ${fmtP(tick)}, size ${fmtN(qty)}` +
+        (owner === "mm" ? ", market maker quote" : owner === "you" ? ", your order" : "") +
+        `, ${row.side === "bid" ? "buy" : "sell"} here`,
+    );
   row.p.textContent = fmtP(tick);
   row.z.textContent = fmtN(qty);
   row.bar.style.transform = `scaleX(${Math.max(0.02, qty / max)})`;
@@ -228,10 +234,22 @@ function render(snap: any) {
 // ---- your working orders: track each user limit order over its life ---------
 type Mine = { id: number; side: number; price: number; orig: number; filled: number; avgTick: number; done: boolean };
 const mineFilled = new Map<number, number>(); // order id -> last filled, to flash on a new fill
+const prevMineLive = new Set<number>(); // live order ids last frame, to surface silent eviction
 let lastMineHTML = "";
 
 function renderMine(snap: any) {
   const mine: Mine[] = snap.mine || [];
+  // A live working order that vanished from tracking was auto-cancelled by the order
+  // cap — tell the user instead of letting their order silently disappear.
+  const ids = new Set<number>();
+  for (const o of mine) ids.add(o.id);
+  for (const id of prevMineLive)
+    if (!ids.has(id)) {
+      showFill("order cap reached — oldest working order cancelled");
+      break;
+    }
+  prevMineLive.clear();
+  for (const o of mine) if (!o.done) prevMineLive.add(o.id);
   const box = $("myorders");
   if (!mine.length) {
     if (!box.hidden) box.hidden = true;
@@ -450,8 +468,17 @@ function wireLadder() {
   }
 }
 
+let cumTextT = 0; // last write to the aria-live #cum readout (throttled to ~4 Hz)
+
 function refreshCum() {
   if (!hoverSide || hoverIdx < 0) return;
+  for (const row of askRows) row.el.classList.toggle("cum", hoverSide === "ask" && row.tick >= 0 && row.idx <= hoverIdx);
+  for (const row of bidRows) row.el.classList.toggle("cum", hoverSide === "bid" && row.tick >= 0 && row.idx <= hoverIdx);
+  // #cum is aria-live: updating it every frame under a held cursor firehoses screen
+  // readers. The highlight above stays instant; the text settles at ~4 Hz.
+  const now = performance.now();
+  if (now - cumTextT < 250) return;
+  cumTextT = now;
   const arr = hoverSide === "ask" ? lastAsks : lastBids;
   let cq = 0;
   let cn = 0;
@@ -460,14 +487,13 @@ function refreshCum() {
     cq += q;
     cn += (toPrice(t) || 0) * q;
   }
-  for (const row of askRows) row.el.classList.toggle("cum", hoverSide === "ask" && row.tick >= 0 && row.idx <= hoverIdx);
-  for (const row of bidRows) row.el.classList.toggle("cum", hoverSide === "bid" && row.tick >= 0 && row.idx <= hoverIdx);
   $("cum").textContent = `Σ ${fmtN(cq)} · $${fmtK(cn)}`;
 }
 
 function clearCum() {
   hoverSide = null;
   hoverIdx = -1;
+  cumTextT = 0; // a fresh hover updates the readout immediately
   for (const row of askRows) row.el.classList.remove("cum");
   for (const row of bidRows) row.el.classList.remove("cum");
   $("cum").textContent = "";
@@ -515,10 +541,15 @@ function wireControls() {
   $("play").textContent = "Pause";
   $("play").onclick = togglePlay;
   $("reset").onclick = () => {
+    // Kill any running execution FIRST: its timer would keep slicing into the fresh
+    // book, its TCA would be benchmarked against a pre-reset arrival mid, and a
+    // surviving passive id would collide with the reset id counter.
+    discardExec();
     sim.reset();
     prevLast = -1;
     hist.length = 0;
     mineFilled.clear();
+    prevMineLive.clear();
     lastMineHTML = "";
     lastTapeHTML = "";
     hMm.length = hMom.length = hMr.length = 0; // reset also flattens the strategies
@@ -600,9 +631,11 @@ let lastMidPrice = 100;
 
 function readIntInput(id: string): number | null {
   const raw = $<HTMLInputElement>(id).value.trim();
-  const n = parseInt(raw, 10);
-  if (!raw || !Number.isFinite(n) || n <= 0) return null;
-  return n;
+  // Number(), not parseInt: parseInt("1e9") === 1 silently. Clamp to the same cap the
+  // engine enforces, so JS-side accounting (sent/filled/%) can't diverge from reality.
+  const n = Number(raw);
+  if (!raw || !Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return null;
+  return Math.min(n, MAX_QTY);
 }
 function money(v: number): string {
   return (v >= 0 ? "+$" : "−$") + Math.abs(v).toFixed(2);
@@ -693,7 +726,10 @@ function startExec() {
   if (qty === null) return setExecLive("enter a valid size");
   const algo = $<HTMLSelectElement>("execAlgo").value as Exec["algo"];
   const side = execSideV;
-  exec = { algo, side, qty, filled: 0, notionalTick: 0, arrivalMid: lastMidPrice, startT: performance.now() };
+  // Benchmark against a FRESH arrival mid — lastMidPrice is one frame stale, which is
+  // the same order of magnitude as the passive edge this lab measures.
+  const arrival = toPrice(sim.snapshot(1).midTick) ?? lastMidPrice;
+  exec = { algo, side, qty, filled: 0, notionalTick: 0, arrivalMid: arrival, startT: performance.now() };
   $<HTMLButtonElement>("execRun").hidden = true;
   $<HTMLButtonElement>("execCancel").hidden = false;
 
@@ -701,8 +737,8 @@ function startExec() {
     submitChild(side, qty);
     finalizeExec();
   } else if (algo === "twap") {
-    const slices = Math.max(1, readIntInput("execSlices") ?? 20);
-    const horizonS = Math.max(1, readIntInput("execHoriz") ?? 10);
+    const slices = Math.min(Math.max(1, readIntInput("execSlices") ?? 20), 200);
+    const horizonS = Math.min(Math.max(1, readIntInput("execHoriz") ?? 10), 300);
     exec.slices = slices;
     exec.slicesLeft = slices;
     exec.sent = 0;
@@ -710,12 +746,17 @@ function startExec() {
     const tick = () => {
       if (!exec) return;
       if (!running) return; // respect a paused market: don't slice into a frozen book
-      const last = exec.slicesLeft! <= 1;
-      const child = last ? exec.qty - exec.sent! : Math.floor(exec.qty / exec.slices!);
+      // A hidden tab suspends rAF (the sim freezes) but NOT setInterval — without this
+      // guard, children would walk ever deeper into a dead, non-replenishing book.
+      if (document.visibilityState === "hidden") return;
+      const done = exec.slices! - exec.slicesLeft!;
+      // Even distribution with the remainder spread out — floor(qty/slices) sends
+      // 0-share children whenever slices > qty and dumps everything on the last tick.
+      const child = Math.round(((done + 1) * exec.qty) / exec.slices!) - exec.sent!;
       submitChild(exec.side, child);
       exec.sent! += child;
       exec.slicesLeft!--;
-      if (last || exec.sent! >= exec.qty) {
+      if (exec.slicesLeft! <= 0 || exec.sent! >= exec.qty) {
         window.clearInterval(exec.twapTimer);
         finalizeExec();
       }
@@ -723,7 +764,7 @@ function startExec() {
     exec.twapTimer = window.setInterval(tick, Math.max(60, exec.horizonMs / slices));
   } else {
     // passive: rest a limit at our near touch (buy at best bid, sell at best ask)
-    const horizonS = Math.max(1, readIntInput("execHoriz") ?? 12);
+    const horizonS = Math.min(Math.max(1, readIntInput("execHoriz") ?? 12), 300);
     exec.horizonMs = horizonS * 1000;
     // Rest at our near touch (buy at best bid, sell at best ask), read from a FRESH
     // top-of-book so a fast tick can't leave us posting a crossing (marketable) price.
@@ -731,19 +772,29 @@ function startExec() {
     const px = side === 0 ? s.bestBid : s.bestAsk;
     const tick = px >= 0 ? px : toTick(exec.arrivalMid);
     const res = sim.submit(0, side, tick, qty);
+    if (res.rejected || res.id == null) {
+      exec = null;
+      $<HTMLButtonElement>("execRun").hidden = false;
+      $<HTMLButtonElement>("execCancel").hidden = true;
+      return setExecLive("order rejected");
+    }
     exec.passiveId = res.id;
+    sim.protectOrder(res.id); // the 6-order cap must not evict the lab's own child
     // The resting order's cumulative fills are the single source of truth (read from the
     // snapshot each frame in updateExec), so we don't separately add the immediate fill.
   }
 }
 function updateExec(snap: any) {
   if (!exec) return;
-  if (exec.algo === "passive" && exec.passiveId != null) {
+  if (exec.algo === "passive") {
+    if (exec.passiveId == null) return finalizeExec(); // should not happen; don't wedge the panel
     const m = (snap.mine as any[]).find((o) => o.id === exec!.passiveId);
     if (m) {
       exec.filled = Math.min(m.filled, exec.qty);
       exec.notionalTick = m.avgTick >= 0 ? m.avgTick * exec.filled : 0;
       if (m.done || exec.filled >= exec.qty) return finalizeExec();
+    } else {
+      return finalizeExec(); // the order vanished from tracking: finalize with what we know
     }
     if (running && performance.now() - exec.startT > (exec.horizonMs ?? 12000)) {
       sim.cancelOrder(exec.passiveId);
@@ -769,21 +820,30 @@ function finalizeExec() {
   // Read the end mid from a FRESH snapshot: a synchronous Market run finalizes before the
   // next render refreshes lastMidPrice, so the child's own impact would otherwise be missed.
   const endMid = toPrice(sim.snapshot(1).midTick) ?? lastMidPrice;
-  const sideSign = e.side === 0 ? -1 : 1; // buy: paying above arrival is a cost
-  const slipBps = avgPrice !== null && arrival > 0 ? sideSign * ((avgPrice - arrival) / arrival) * 1e4 : null;
-  const midDeltaBps = arrival > 0 ? ((endMid - arrival) / arrival) * 1e4 : 0; // raw signed mid move
+  // Implementation shortfall, desk convention: POSITIVE = cost. Filled shares pay
+  // (avg − arrival) signed by side; the UNFILLED remainder is marked at the end mid,
+  // so a passive order that misses its fill pays for the move away instead of the
+  // adverse outcome silently vanishing from the table (selection bias).
+  const sideSign = e.side === 0 ? 1 : -1; // buy: prices above arrival = cost
+  const unfilled = e.qty - filled;
+  const fillCost = avgPrice !== null ? sideSign * (avgPrice - arrival) * filled : 0;
+  const oppCost = sideSign * (endMid - arrival) * unfilled;
+  const isBps = arrival > 0 ? ((fillCost + oppCost) / (e.qty * arrival)) * 1e4 : null;
+  // Side-adjusted mid move over the run (+ = the market moved against this order).
+  // One run's move is mostly noise + your own impact — compare across repeated runs.
+  const moveBps = arrival > 0 ? sideSign * ((endMid - arrival) / arrival) * 1e4 : 0;
   const durS = (performance.now() - e.startT) / 1000;
   const names: Record<string, string> = { market: "Market", twap: "TWAP", passive: "Passive" };
   const bp = (v: number | null) => (v === null ? "—" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1));
-  const cls = (v: number | null) => (v === null ? "" : v >= 0.05 ? "pos" : v <= -0.05 ? "neg" : "");
+  const cls = (v: number | null) => (v === null ? "" : v >= 0.05 ? "neg" : v <= -0.05 ? "pos" : "");
   const row =
     `<tr>` +
     `<td class="algo">${names[e.algo]}</td>` +
     `<td class="dimc">${e.side ? "sell" : "buy"} ${fmtN(e.qty)}</td>` +
     `<td class="num">${avgPrice !== null ? avgPrice.toFixed(2) : "—"}</td>` +
-    `<td class="num ${cls(slipBps)}">${bp(slipBps)}</td>` +
+    `<td class="num ${cls(isBps)}">${bp(isBps)}</td>` +
     `<td class="num">${fillPct}%</td>` +
-    `<td class="num dimc">${bp(midDeltaBps)}</td>` +
+    `<td class="num dimc">${bp(moveBps)}</td>` +
     `<td class="num dimc">${durS.toFixed(1)}s</td>` +
     `</tr>`;
   execHistory.unshift(row);
@@ -794,6 +854,17 @@ function cancelExec() {
   if (!exec) return;
   if (exec.passiveId != null) sim.cancelOrder(exec.passiveId);
   finalizeExec();
+}
+// Silently drop a running execution with NO TCA row — used by reset, where the book
+// (and the arrival benchmark) the run started against no longer exists.
+function discardExec() {
+  if (!exec) return;
+  if (exec.twapTimer) window.clearInterval(exec.twapTimer);
+  if (exec.passiveId != null) sim.cancelOrder(exec.passiveId);
+  exec = null;
+  $<HTMLButtonElement>("execRun").hidden = false;
+  $<HTMLButtonElement>("execCancel").hidden = true;
+  setExecLive("");
 }
 function wireExec() {
   setExecSide(execSideV);
@@ -857,9 +928,15 @@ function wireStrats() {
   ["mmHalf", "mmSize", "mmInv"].forEach((id) => $(id).addEventListener("input", cfg));
   cfg();
 
+  // Mirrors the presets in Sim::scenario (sim.cpp) — keep in sync. Without this the
+  // turbulence slider lies about engine state after a scenario click, and nudging it
+  // snaps the market back to the stale displayed value.
+  const SCENARIO_TURB: Record<number, number> = { 0: 8, 1: 20, 2: 26, 3: 72 };
   document.querySelectorAll<HTMLElement>(".btn.sc").forEach((b) =>
     b.addEventListener("click", () => {
-      sim.scenario(+(b.dataset.sc || 0));
+      const sc = +(b.dataset.sc || 0);
+      sim.scenario(sc);
+      if (sc in SCENARIO_TURB) $<HTMLInputElement>("turb").value = String(SCENARIO_TURB[sc]);
       document.querySelectorAll(".btn.sc").forEach((x) => {
         x.classList.remove("on");
         x.setAttribute("aria-pressed", "false");
@@ -995,6 +1072,7 @@ boot()
     wireIntro();
   })
   .catch((err) => {
+    console.error(err); // post-boot wiring errors used to vanish: #boot is gone by then
     const b = document.getElementById("boot");
     if (b) b.textContent = "failed to load the engine: " + err;
   });
