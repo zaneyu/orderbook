@@ -132,6 +132,7 @@ public:
         tape_.clear();
         next_id_ = 1;
         trades_ = 0;
+        evicted_ = 0;
         last_ = -1;
         fv_ = start_;
         drift_ = 0.0;
@@ -200,17 +201,22 @@ public:
             mine_.push_front(u);
             // Bound the tracked set at 6, but never silently kill live risk if a husk
             // will do: drop the oldest FILLED/CANCELLED entries first, and only then
-            // cancel the oldest live order — skipping protected ones (the execution
-            // lab's child must not be evicted out from under its own metrics).
-            for (std::size_t i = mine_.size(); i-- > 0 && mine_.size() > 6;)
-                if (mine_[i].done) mine_.erase(mine_.begin() + i);
+            // cancel the oldest live order. Husk-dropping skips (a) protected entries —
+            // the execution lab's child must survive until JS has read its final fills,
+            // even if it filled and completed inside THIS submit call — and (b) the
+            // just-pushed order at index 0, so an immediately-fully-filled limit still
+            // renders once instead of vanishing before its first snapshot.
+            for (std::size_t i = mine_.size(); i-- > 1 && mine_.size() > 6;)
+                if (mine_[i].done && !mine_[i].protect) mine_.erase(mine_.begin() + i);
             while (mine_.size() > 6) {
                 std::size_t v = mine_.size();
                 for (std::size_t i = mine_.size(); i-- > 0;)
                     if (!mine_[i].protect) { v = i; break; }  // first hit = oldest unprotected
                 if (v == mine_.size()) break;  // everything protected: let it grow instead
-                book_.cancel(mine_[v].id);     // the UI detects the disappearance and says so
+                book_.cancel(mine_[v].id);
                 mine_.erase(mine_.begin() + v);
+                ++evicted_;  // reported in snapshot(): the UI toasts on the counter, so a
+                             // filled order purged as a husk can never false-flag as evicted
             }
         }
         val r = val::object();
@@ -232,11 +238,12 @@ public:
     }
 
     // Exempt a tracked order from the 6-order cap (the execution lab's passive child:
-    // evicting it would silently freeze the lab's fill metrics mid-run).
-    void protectOrder(double idd) {
+    // evicting or husk-purging it mid-run would freeze/corrupt the lab's fill metrics).
+    // The lab clears the flag when it finalizes, so done husks don't accumulate.
+    void protectOrder(double idd, bool on) {
         const OrderId id = static_cast<OrderId>(idd);
         for (auto& u : mine_)
-            if (u.id == id) { u.protect = true; break; }
+            if (u.id == id) { u.protect = on; break; }
     }
 
     // --- market maker: an automated two-sided quoter (see mm_* below) ---
@@ -329,6 +336,7 @@ public:
         o.set("lastTrade", static_cast<int>(last_));
         o.set("trades", static_cast<double>(trades_));
         o.set("resting", static_cast<double>(book_.resting_orders()));
+        o.set("evicted", static_cast<double>(evicted_));  // cumulative cap-evictions of LIVE orders
 
         double mid;
         if (book_.has_bid() && book_.has_ask())
@@ -408,7 +416,7 @@ public:
 private:
     val side_levels(Side side, int depth) {
         val arr = val::array();
-        book_.for_levels(side, depth, [&](Price p, Qty q) {
+        book_.for_levels(side, depth, [&](Price p, std::uint64_t q) {  // u64 level totals
             val lvl = val::array();
             lvl.call<void>("push", static_cast<int>(p));
             lvl.call<void>("push", static_cast<double>(q));
@@ -705,6 +713,7 @@ private:
     std::vector<OrderId> live_;
     OrderId next_id_ = 1;
     std::uint64_t trades_ = 0;
+    std::uint64_t evicted_ = 0;  // live orders cancelled by the tracked-order cap
     Price last_ = -1;
 
     // market maker

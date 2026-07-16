@@ -103,7 +103,9 @@ function paint(row: Row, level: [number, number] | null, idx: number, max: numbe
   row.p.textContent = fmtP(tick);
   row.z.textContent = fmtN(qty);
   row.bar.style.transform = `scaleX(${Math.max(0.02, qty / max)})`;
-  if (animate && row.last !== -1 && row.last !== qty) {
+  // Flash only on a qty change AT THE SAME price — a row reused for a different level
+  // (book shifted) inherits a different qty without any trade having happened there.
+  if (animate && !tickChanged && row.last !== -1 && row.last !== qty) {
     row.el.classList.remove("flash");
     void row.el.offsetWidth; // restart the animation
     row.el.classList.add("flash");
@@ -234,22 +236,17 @@ function render(snap: any) {
 // ---- your working orders: track each user limit order over its life ---------
 type Mine = { id: number; side: number; price: number; orig: number; filled: number; avgTick: number; done: boolean };
 const mineFilled = new Map<number, number>(); // order id -> last filled, to flash on a new fill
-const prevMineLive = new Set<number>(); // live order ids last frame, to surface silent eviction
+let lastEvicted = 0; // sim's cumulative live-eviction counter, to surface cap evictions
 let lastMineHTML = "";
 
 function renderMine(snap: any) {
   const mine: Mine[] = snap.mine || [];
-  // A live working order that vanished from tracking was auto-cancelled by the order
-  // cap — tell the user instead of letting their order silently disappear.
-  const ids = new Set<number>();
-  for (const o of mine) ids.add(o.id);
-  for (const id of prevMineLive)
-    if (!ids.has(id)) {
-      showFill("order cap reached — oldest working order cancelled");
-      break;
-    }
-  prevMineLive.clear();
-  for (const o of mine) if (!o.done) prevMineLive.add(o.id);
+  // The sim counts LIVE orders cancelled by the tracked-order cap; toast on increase.
+  // (Inferring eviction from an id vanishing false-fired when a crossing order FILLED
+  // resting orders and their husks were purged within the same submit call.)
+  const ev = (snap.evicted as number) ?? 0;
+  if (ev > lastEvicted) showFill("order cap reached — oldest working order cancelled");
+  lastEvicted = ev; // assignment also handles the counter dropping to 0 on reset
   const box = $("myorders");
   if (!mine.length) {
     if (!box.hidden) box.hidden = true;
@@ -469,15 +466,20 @@ function wireLadder() {
 }
 
 let cumTextT = 0; // last write to the aria-live #cum readout (throttled to ~4 Hz)
+let cumKey = ""; // side+idx of the last written readout — a row CHANGE bypasses the throttle
 
 function refreshCum() {
   if (!hoverSide || hoverIdx < 0) return;
   for (const row of askRows) row.el.classList.toggle("cum", hoverSide === "ask" && row.tick >= 0 && row.idx <= hoverIdx);
   for (const row of bidRows) row.el.classList.toggle("cum", hoverSide === "bid" && row.tick >= 0 && row.idx <= hoverIdx);
   // #cum is aria-live: updating it every frame under a held cursor firehoses screen
-  // readers. The highlight above stays instant; the text settles at ~4 Hz.
+  // readers. The highlight stays instant, and moving to a DIFFERENT row updates the
+  // text immediately (a stale readout for the wrong row is a lie, not a throttle);
+  // only same-row frame-by-frame churn settles at ~4 Hz.
   const now = performance.now();
-  if (now - cumTextT < 250) return;
+  const key = `${hoverSide}:${hoverIdx}`;
+  if (key === cumKey && now - cumTextT < 250) return;
+  cumKey = key;
   cumTextT = now;
   const arr = hoverSide === "ask" ? lastAsks : lastBids;
   let cq = 0;
@@ -494,6 +496,7 @@ function clearCum() {
   hoverSide = null;
   hoverIdx = -1;
   cumTextT = 0; // a fresh hover updates the readout immediately
+  cumKey = "";
   for (const row of askRows) row.el.classList.remove("cum");
   for (const row of bidRows) row.el.classList.remove("cum");
   $("cum").textContent = "";
@@ -549,7 +552,7 @@ function wireControls() {
     prevLast = -1;
     hist.length = 0;
     mineFilled.clear();
-    prevMineLive.clear();
+    lastEvicted = 0;
     lastMineHTML = "";
     lastTapeHTML = "";
     hMm.length = hMom.length = hMr.length = 0; // reset also flattens the strategies
@@ -745,9 +748,16 @@ function startExec() {
     exec.horizonMs = horizonS * 1000;
     const tick = () => {
       if (!exec) return;
-      if (!running) return; // respect a paused market: don't slice into a frozen book
-      // A hidden tab suspends rAF (the sim freezes) but NOT setInterval — without this
-      // guard, children would walk ever deeper into a dead, non-replenishing book.
+      // A frozen run can't stay "working" forever: if wall-clock blows past 4x the
+      // horizon (paused / hidden / activity 0), record what actually happened and stop.
+      if (performance.now() - exec.startT > exec.horizonMs! * 4 + 30000) {
+        window.clearInterval(exec.twapTimer);
+        return finalizeExec();
+      }
+      // Don't slice into a frozen, non-replenishing book. The sim only steps when
+      // `running && speed > 0` AND the tab is visible (rAF suspends hidden tabs while
+      // setInterval keeps firing) — guard on ALL THREE freeze paths, not a subset.
+      if (!running || speed <= 0) return;
       if (document.visibilityState === "hidden") return;
       const done = exec.slices! - exec.slicesLeft!;
       // Even distribution with the remainder spread out — floor(qty/slices) sends
@@ -779,7 +789,7 @@ function startExec() {
       return setExecLive("order rejected");
     }
     exec.passiveId = res.id;
-    sim.protectOrder(res.id); // the 6-order cap must not evict the lab's own child
+    sim.protectOrder(res.id, true); // the order cap must not evict/purge the lab's child
     // The resting order's cumulative fills are the single source of truth (read from the
     // snapshot each frame in updateExec), so we don't separately add the immediate fill.
   }
@@ -809,6 +819,7 @@ function finalizeExec() {
   const e = exec;
   exec = null;
   if (e.twapTimer) window.clearInterval(e.twapTimer);
+  if (e.passiveId != null) sim.protectOrder(e.passiveId, false); // let the husk be reaped
   $<HTMLButtonElement>("execRun").hidden = false;
   $<HTMLButtonElement>("execCancel").hidden = true;
   setExecLive("");
@@ -860,7 +871,10 @@ function cancelExec() {
 function discardExec() {
   if (!exec) return;
   if (exec.twapTimer) window.clearInterval(exec.twapTimer);
-  if (exec.passiveId != null) sim.cancelOrder(exec.passiveId);
+  if (exec.passiveId != null) {
+    sim.cancelOrder(exec.passiveId);
+    sim.protectOrder(exec.passiveId, false);
+  }
   exec = null;
   $<HTMLButtonElement>("execRun").hidden = false;
   $<HTMLButtonElement>("execCancel").hidden = true;
@@ -923,8 +937,16 @@ function wireStrats() {
   momBtn.onclick = () => { momOn = !momOn; sim.momEnable(momOn); toggleStrat(momBtn, momOn); };
   mrBtn.onclick = () => { mrOn = !mrOn; sim.mrEnable(mrOn); toggleStrat(mrBtn, mrOn); };
 
-  const cfg = () =>
-    sim.mmConfig(readIntInput("mmHalf") ?? 1, readIntInput("mmSize") ?? 200, readIntInput("mmInv") ?? 2000);
+  // Apply the MM config only when ALL fields parse: cfg fires per keystroke, and a
+  // transiently empty field used to slam in a hardcoded default (select-all + retype
+  // in the inventory cap momentarily quoted against a limit the user never chose).
+  const cfg = () => {
+    const half = readIntInput("mmHalf");
+    const size = readIntInput("mmSize");
+    const inv = readIntInput("mmInv");
+    if (half === null || size === null || inv === null) return; // mid-edit: keep last applied
+    sim.mmConfig(half, size, inv);
+  };
   ["mmHalf", "mmSize", "mmInv"].forEach((id) => $(id).addEventListener("input", cfg));
   cfg();
 

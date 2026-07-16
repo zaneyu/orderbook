@@ -47,7 +47,10 @@ Two applications are built on the same engine, in tabs:
   maker quotes off the book mid with its own quotes pulled and estimates volatility from
   observed mid changes, and it requotes at the END of each frame, so a news jump or
   informed flow can genuinely pick off its stale quotes, exactly like a real quoter.
-  (No fees/rebates are modelled; spread-capture economics are gross.)
+  (No fees/rebates are modelled; spread-capture economics are gross. The maker's σ² is
+  realized top-of-book mid variance — microstructure bounce included, the vol a quoter
+  actually measures from the touch — with per-frame sampling calibrated for ≥60 Hz
+  displays; sub-60 Hz devices read vol modestly high.)
 
 ## Rebuild the WASM (only if the engine or bindings change)
 
