@@ -201,6 +201,44 @@ TEST(level_total_beyond_u32_stays_exact) {
     CHECK_EQ(fills.size(), std::size_t{1});
 }
 
+TEST(rest_only_rests_crossing_orders_without_matching) {
+    // Feed-replay primitive: the venue already matched, so a crossed book is a valid
+    // state to materialize (pre-open). rest_only must never generate fills, and later
+    // matching must consume the crossed book in price-time order.
+    OrderBook b(TICKS);
+    fills.clear();
+    CHECK(b.rest_only(1, Side::Sell, 100, 5));
+    CHECK(b.rest_only(2, Side::Buy, 103, 4));  // crosses the resting ask: rests anyway
+    CHECK(b.has_bid());
+    CHECK_EQ(b.best_bid(), Price{103});
+    CHECK_EQ(b.best_ask(), Price{100});  // crossed book, by design
+    CHECK_EQ(b.qty_at(Side::Buy, 103), std::uint64_t{4});
+    CHECK(!b.rest_only(1, Side::Buy, 50, 5));   // duplicate id rejected
+    CHECK(!b.rest_only(9, Side::Buy, -1, 5));   // out of range rejected
+    CHECK(!b.rest_only(9, Side::Buy, 100, 0));  // zero qty rejected
+    fills.clear();
+    b.add_market(9, Side::Sell, 4, fills);  // consumes the crossed bid at ITS price
+    CHECK_EQ(fills.size(), std::size_t{1});
+    CHECK_EQ(fills[0].maker, OrderId{2});
+    CHECK_EQ(fills[0].price, Price{103});
+}
+
+TEST(front_order_returns_fifo_head) {
+    OrderBook b(TICKS);
+    fills.clear();
+    OrderId f = 0;
+    CHECK(!b.front_order(Side::Buy, 100, f));  // empty level
+    CHECK(!b.front_order(Side::Buy, -1, f));   // out of range
+    b.add_limit(7, Side::Buy, 100, 5, fills);
+    b.add_limit(8, Side::Buy, 100, 5, fills);
+    CHECK(b.front_order(Side::Buy, 100, f));
+    CHECK_EQ(f, OrderId{7});  // oldest first
+    fills.clear();
+    b.add_limit(9, Side::Sell, 100, 5, fills);  // consumes id 7 exactly
+    CHECK(b.front_order(Side::Buy, 100, f));
+    CHECK_EQ(f, OrderId{8});  // head advanced
+}
+
 TEST(market_taker_id_may_collide_with_resting_id) {
     // market/IOC/FOK ids are tags on emitted fills, not indexed — a collision with a
     // resting order's id must not reject the taker.
@@ -405,6 +443,21 @@ void run_fuzz(std::uint64_t seed, int n_ops) {
             const Qty r2 = ref.add_limit(id, side, price, qty, rb);
             if (r1 != r2) ++mismatches;
             if (r1 > 0) live.push_back({id, price});
+        } else if (roll < 46) {  // rest_only: feed-replay path, may create CROSSED books
+            op = "rest_only";
+            const bool adv = adversarial();
+            const OrderId id = (adv && !live.empty() && (rng() & 1))
+                                   ? live[rng() % live.size()].id
+                                   : next_id++;
+            const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
+            const Price price = adv ? pick_adv_price() : pick_price();
+            const Qty qty = adv ? pick_adv_qty() : pick_qty();
+            const bool r1 = fast.rest_only(id, side, price, qty);
+            const bool r2 = ref.rest_only(id, side, price, qty);
+            if (r1 != r2) ++mismatches;
+            if (r1) live.push_back({id, price});
+            // every subsequent op then runs against possibly-crossed state — the
+            // matching paths must consume a crossed book identically to the oracle
         } else if (roll < 52) {  // market (taker tag may collide with a resting id)
             op = "add_market";
             const OrderId id = (!live.empty() && rng() % 8 == 0) ? live[rng() % live.size()].id

@@ -15,9 +15,10 @@ target_include_directories(orderbook INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 enable_testing()
 
 # Each test is a standalone binary using the tiny zero-dep framework in tests/.
-foreach(t test_orderbook test_occupancy test_flat_id_map test_alloc_audit)
+foreach(t test_orderbook test_occupancy test_flat_id_map test_alloc_audit test_itch)
   add_executable(${t} tests/${t}.cpp)
-  target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests
+                                          ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(${t} PRIVATE orderbook)
   target_compile_options(${t} PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME ${t} COMMAND ${t})
@@ -26,3 +27,11 @@ endforeach()
 add_executable(ob_bench bench/bench.cpp)
 target_link_libraries(ob_bench PRIVATE orderbook)
 target_compile_options(ob_bench PRIVATE -O3)
+
+# ITCH replay + queue-position simulator over real TotalView-ITCH 5.0 days.
+foreach(t itch_replay queue_sim)
+  add_executable(${t} tools/${t}.cpp)
+  target_include_directories(${t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(${t} PRIVATE orderbook)
+  target_compile_options(${t} PRIVATE -O3 -Wall -Wextra -Wpedantic -Werror)
+endforeach()

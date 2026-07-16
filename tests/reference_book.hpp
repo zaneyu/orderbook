@@ -37,6 +37,13 @@ public:
         return qty;
     }
 
+    bool rest_only(OrderId id, Side side, Price price, Qty qty) {
+        if (qty == 0 || price < 0 || price >= num_ticks_ || ids_.count(id)) return false;
+        (side == Side::Buy ? bids_ : asks_)[price].push_back({id, qty});
+        ids_.insert(id);
+        return true;
+    }
+
     Qty add_market(OrderId id, Side side, Qty qty, std::vector<Trade>& out) {
         if (qty == 0) return 0;
         if (side == Side::Buy)

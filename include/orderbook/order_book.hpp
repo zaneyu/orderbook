@@ -76,6 +76,18 @@ public:
         return rem;
     }
 
+    // Rest an order WITHOUT matching, even if it crosses the book. For replaying an
+    // L3 market-by-order feed (e.g. ITCH), where the venue has already done the
+    // matching and executions arrive as separate events: pre-open books are
+    // legitimately crossed, so a book builder must be able to materialize exactly
+    // what the feed says is resting. Same rejection rules as add_limit (duplicate id,
+    // out-of-range price, zero qty). Returns true if the order rested.
+    bool rest_only(OrderId id, Side side, Price price, Qty qty) {
+        if (qty == 0 || price < 0 || price >= num_ticks_ || id_map_.contains(id)) return false;
+        rest(id, side, price, qty);
+        return true;
+    }
+
     // Market order: match up to `qty` against the opposite side; never rests. Returns
     // the unfilled quantity (nonzero only if the book ran dry). `id` is used only as the
     // taker tag on emitted fills; since a market order never rests it is not indexed and
@@ -191,6 +203,17 @@ public:
     std::uint64_t qty_at(Side side, Price price) const {
         if (price < 0 || price >= num_ticks_) return 0;
         return (side == Side::Buy ? bid_levels_ : ask_levels_)[static_cast<std::size_t>(price)].total;
+    }
+
+    // The order at the FRONT of a level's FIFO (the one price-time priority fills
+    // next). Returns false if the level is empty or the price is out of range.
+    bool front_order(Side side, Price price, OrderId& out) const {
+        if (price < 0 || price >= num_ticks_) return false;
+        const auto& levels = (side == Side::Buy) ? bid_levels_ : ask_levels_;
+        const std::uint32_t h = levels[static_cast<std::size_t>(price)].head;
+        if (h == NIL) return false;
+        out = pool_[h].id;
+        return true;
     }
 
     // Per-order walk of one price level in FIFO (time-priority) order, calling

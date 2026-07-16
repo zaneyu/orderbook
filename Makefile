@@ -1,11 +1,16 @@
 CXX ?= c++
 STD  := -std=c++20
 WARN := -Wall -Wextra -Wpedantic -Werror
-INC  := -Iinclude -Itests
-TESTS := test_orderbook test_occupancy test_flat_id_map test_alloc_audit
+INC  := -Iinclude -Itests -I.
+TESTS := test_orderbook test_occupancy test_flat_id_map test_alloc_audit test_itch
 
-.PHONY: all test bench asan clean
+.PHONY: all test bench tools asan clean
 all: test
+
+# ITCH replay + queue-position simulator over real TotalView-ITCH 5.0 days.
+tools:
+	$(CXX) $(STD) $(WARN) -O3 -DNDEBUG $(INC) tools/itch_replay.cpp -o itch_replay
+	$(CXX) $(STD) $(WARN) -O3 -DNDEBUG $(INC) tools/queue_sim.cpp -o queue_sim
 
 test:
 	@for t in $(TESTS); do \
@@ -26,4 +31,4 @@ asan:
 	./ob_asan
 
 clean:
-	rm -f ob_bench ob_asan $(TESTS)
+	rm -f ob_bench ob_asan itch_replay queue_sim $(TESTS)
