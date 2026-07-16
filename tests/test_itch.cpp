@@ -66,6 +66,13 @@ struct Stream {
         Wire m; m.u8('D'); m.u16(locate); m.u16(0); m.u48(ts); m.u64(ref);
         put(m);
     }
+    // 'C': executed at a price other than the display price
+    void exec_c(std::uint16_t locate, std::uint64_t ts, std::uint64_t ref,
+                std::uint32_t shares, std::uint32_t exec_price4) {
+        Wire m; m.u8('C'); m.u16(locate); m.u16(0); m.u48(ts); m.u64(ref);
+        m.u32(shares); m.u64(777); m.u8('Y'); m.u32(exec_price4);
+        put(m);
+    }
     void replace(std::uint16_t locate, std::uint64_t ts, std::uint64_t orig,
                  std::uint64_t nref, std::uint32_t shares, std::uint32_t price4) {
         Wire m; m.u8('U'); m.u16(locate); m.u16(0); m.u48(ts); m.u64(orig); m.u64(nref);
@@ -139,6 +146,20 @@ TEST(itch_reader_flags_truncated_stream) {
     std::fclose(f);
 }
 
+TEST(itch_reader_flags_stream_cut_inside_length_prefix) {
+    Stream s;
+    s.add(7, 1, 42, 'B', 100, "AAPL", 1000000);
+    std::vector<std::uint8_t> cut = s.bytes;
+    cut.push_back(0x00);  // one dangling byte of the NEXT record's length prefix
+    std::FILE* f = fmemopen(cut.data(), cut.size(), "rb");
+    Reader r(f);
+    MsgView m;
+    CHECK(r.next(m));
+    CHECK(!r.next(m));
+    CHECK(r.truncated());  // used to read as a clean, complete stream
+    std::fclose(f);
+}
+
 // -------------------------------------------------------------- book building
 
 TEST(builder_builds_and_validates_book_state) {
@@ -208,6 +229,22 @@ TEST(builder_ignores_subpenny_orders_and_their_later_events) {
     CHECK_EQ(st.ignored_events, std::uint64_t{3});  // E + U + D on the skipped chain
     CHECK_EQ(st.unknown_ref, std::uint64_t{0});     // NOT misread as feed anomalies
     CHECK_EQ(b.book(0).resting_orders(), std::size_t{0});
+}
+
+TEST(builder_c_executions_update_book_but_not_fidelity) {
+    Stream s;
+    s.dir(7, "AAPL");
+    s.sys(1 * SEC, 'Q');
+    s.add(7, 2 * SEC, 1, 'B', 100, "AAPL", 1000000);
+    // 'C': the head executes 40sh at a NON-display price (price-improved path).
+    s.exec_c(7, 3 * SEC, 1, 40, 1000050);
+    BookBuilder b(one_symbol());
+    run(s, b);
+    const auto& st = b.stats();
+    CHECK_EQ(st.execs, std::uint64_t{1});
+    CHECK_EQ(st.c_execs, std::uint64_t{1});
+    CHECK_EQ(st.e_rth, std::uint64_t{0});  // fidelity metric is display-price 'E' only
+    CHECK_EQ(b.book(0).qty_at(ob::Side::Buy, 10000), std::uint64_t{60});  // book updated
 }
 
 TEST(builder_counts_genuine_unknown_refs) {
@@ -316,6 +353,84 @@ TEST(queue_sim_trade_through_fills_the_remainder) {
     CHECK_EQ(t.remaining, std::uint32_t{0});
     CHECK_EQ(t.t_first, 18 * SEC);
     CHECK(!t.open);
+}
+
+TEST(queue_sim_opening_event_is_not_double_counted) {
+    // A trial opened BY an execution event snapshots the post-application book; that
+    // same event must not also step the new trial (it double-counted the reduction,
+    // biasing P(fill) optimistic ~3% on real data).
+    Stream s;
+    s.dir(7, "AAPL");
+    s.sys(10 * SEC, 'Q');
+    s.add(7, 11 * SEC, 1, 'B', 150, "AAPL", 1000000);
+    s.add(7, 11 * SEC, 3, 'S', 80, "AAPL", 1000100);
+    // this exec lands past the first sample tick, so IT opens the trial:
+    s.exec(7, 17 * SEC, 1, 50);   // ref1: 150 -> 100 applied, THEN trial opens
+    s.exec(7, 18 * SEC, 1, 50);   // ahead 100 -> 50
+    s.add(7, 19 * SEC, 5, 'B', 200, "AAPL", 1000000);
+    s.exec(7, 20 * SEC, 5, 60);   // 50sh still genuinely ahead: anomaly, NOT a fill
+    SimRig rig;
+    rig.feed(s);
+    const auto& t = rig.sim.trials()[0];
+    CHECK_EQ(t.ahead0, std::uint64_t{100});    // post-application snapshot
+    CHECK_EQ(t.ahead, std::uint64_t{50});      // exactly one 50sh decrement
+    CHECK_EQ(t.remaining, std::uint32_t{100}); // no phantom fill
+    CHECK_EQ(t.anomalies, std::uint32_t{1});
+}
+
+TEST(queue_sim_opposite_side_exec_through_price_is_not_trade_through) {
+    Stream s;
+    setup_queue(s);
+    // A stale ASK below our bid executes (locked/crossed remnant): says nothing about
+    // OUR bid queue — must not fill the phantom.
+    s.add(7, 17 * SEC + 1, 6, 'S', 30, "AAPL", 999800);  // ask 99.98 < our 100.00
+    s.exec(7, 18 * SEC, 6, 30);
+    SimRig rig;
+    rig.feed(s);
+    const auto& t = rig.sim.trials()[0];
+    CHECK(!t.traded_through);
+    CHECK_EQ(t.remaining, std::uint32_t{100});
+}
+
+TEST(queue_sim_c_exec_behind_us_does_not_fill) {
+    Stream s;
+    setup_queue(s);
+    s.exec(7, 18 * SEC, 1, 100);  // drain the queue ahead
+    s.del(7, 19 * SEC, 2);
+    s.add(7, 20 * SEC, 5, 'B', 200, "AAPL", 1000000);
+    // 'C' behind us traded at some OTHER price: reduces that order, but is not
+    // display-price volume at our level — must not fill the phantom.
+    s.exec_c(7, 21 * SEC, 5, 60, 1000050);
+    SimRig rig;
+    rig.feed(s);
+    const auto& t = rig.sim.trials()[0];
+    CHECK_EQ(t.remaining, std::uint32_t{100});
+    CHECK_EQ(t.t_first, std::uint64_t{0});
+}
+
+TEST(queue_sim_reanchors_sampling_after_event_gaps) {
+    Stream s;
+    s.dir(7, "AAPL");
+    s.sys(10 * SEC, 'Q');
+    s.add(7, 11 * SEC, 1, 'B', 100, "AAPL", 1000000);   // arms sampling at 16s
+    s.add(7, 11 * SEC, 3, 'S', 80, "AAPL", 1000100);
+    s.add(7, 60 * SEC, 5, 'B', 10, "AAPL", 999900);     // 44s quiet gap -> ONE trial
+    s.add(7, 61 * SEC, 6, 'B', 10, "AAPL", 999800);     // within the re-anchored window
+    SimRig rig;
+    rig.feed(s);
+    // without re-anchoring, the 44s gap would burst-open ~9 make-up trials
+    CHECK_EQ(rig.sim.trials().size(), std::size_t{1});
+}
+
+TEST(queue_sim_flush_clamps_expired_trials_to_horizon) {
+    Stream s;
+    setup_queue(s);  // trial opens at 17s; nothing else happens
+    SimRig rig(/*horizon_s=*/10);
+    rig.feed(s);
+    rig.sim.flush(500 * SEC);  // end of stream long after expiry
+    const auto& t = rig.sim.trials()[0];
+    CHECK(!t.open);
+    CHECK_EQ(t.t_done, 27 * SEC);  // t0 + horizon, not the flush timestamp
 }
 
 TEST(queue_sim_expires_at_horizon_without_late_fills) {

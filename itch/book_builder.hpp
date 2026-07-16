@@ -196,10 +196,9 @@ public:
                         ignored_.insert(u.new_ref);
                         break;
                     }
-                    // untracked orig: only an anomaly if its symbol is one we track —
-                    // but we can't know the symbol without the orig. Count it only if
-                    // the locate maps to a tracked book (locate is in the U message).
-                    if (locate_to_book_[u.locate] >= 0) ++stats_.unknown_ref;
+                    // tracked symbol (checked above), but the orig ref was never seen:
+                    // a genuine feed/book anomaly
+                    ++stats_.unknown_ref;
                     break;
                 }
                 ++stats_.replaces;
@@ -382,8 +381,11 @@ private:
         if (left == 0) {
             bk.cancel(ref);
             untaint_if_released(o, ref);
+            // A full execution stays Exec (it IS traded volume); an X cancelling the
+            // whole remainder is a removal-not-via-execution, i.e. Remove — sinks can
+            // then drop the ref from ahead-sets exactly like a D.
             if (sink_)
-                sink_->on_event({is_exec ? Event::Exec : Event::Reduce, o.book, o.side, o.price,
+                sink_->on_event({is_exec ? Event::Exec : Event::Remove, o.book, o.side, o.price,
                                  ref, n, ts, at_display});
             orders_.erase(it);
         } else {

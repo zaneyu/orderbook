@@ -149,12 +149,17 @@ inline HiddenTrade decode_hidden_trade(const std::uint8_t* p) {
 class Reader {
 public:
     explicit Reader(std::FILE* f, std::size_t buf_size = 1u << 20)
-        : f_(f), buf_(buf_size), fill_(0), pos_(0) {}
+        : f_(f), buf_(buf_size < (1u << 17) ? (1u << 17) : buf_size), fill_(0), pos_(0) {}
+        // buffer floor: must hold the largest possible record (64KB + prefix), or a
+        // legal oversized message would misreport as truncation
 
     // Advance to the next message. Returns false on clean EOF; sets `truncated()` if
     // the stream ended mid-record (a partial download — everything before is valid).
     bool next(MsgView& out) {
-        if (!ensure(2)) return false;
+        if (!ensure(2)) {
+            if (fill_ - pos_ > 0) truncated_ = true;  // ended inside the length prefix
+            return false;
+        }
         const std::size_t len = be16(&buf_[pos_]);
         if (len == 0) { truncated_ = true; return false; }  // corrupt length
         if (!ensure(2 + len)) { truncated_ = true; return false; }

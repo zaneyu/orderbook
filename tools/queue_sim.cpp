@@ -71,7 +71,10 @@ int main(int argc, char** argv) {
         else if (argv[i][0] == '-' && argv[i][1] != '\0') { usage(); return 2; }
         else path = argv[i];
     }
-    if (!path || qcfg.phantom_qty == 0) {
+    // atoi/atof turn garbage into 0 and negatives wrap the unsigned fields — a zero
+    // interval means one trial per book per EVENT (millions on a real day). Reject.
+    if (!path || qcfg.phantom_qty == 0 || qcfg.phantom_qty > 1'000'000 ||
+        qcfg.sample_every_ns == 0 || qcfg.horizon_ns == 0) {
         usage();
         return 2;
     }

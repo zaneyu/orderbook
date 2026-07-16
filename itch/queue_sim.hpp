@@ -59,7 +59,6 @@ public:
     QueueSim(Config cfg, const BookBuilder* builder) : cfg_(cfg), builder_(builder) {}
 
     void on_event(const Event& ev) override {
-        maybe_sample(ev.ts);
         auto& idx = by_book_[ev.book];
         for (std::size_t k = 0; k < idx.size();) {
             Trial& t = trials_[idx[k]];
@@ -74,12 +73,18 @@ public:
             else step_trial(t, ev);
             ++k;
         }
+        // Sample LAST: a trial opened by this event snapshots the post-application
+        // book, so stepping it on the same event would double-count the reduction
+        // already reflected in ahead0 (measured: biased P(fill) optimistic by ~3%).
+        maybe_sample(ev.ts);
     }
 
-    // Close every still-open trial (end of stream): counted as expired at last ts.
+    // Close every still-open trial (end of stream). Clamped to each trial's horizon so
+    // an `expired` row's t_close is horizon-consistent whether its book went quiet or
+    // the stream simply ended.
     void flush(std::uint64_t ts) {
         for (auto& t : trials_)
-            if (t.open) close_trial(t, ts);
+            if (t.open) close_trial(t, std::min(ts, t.t0 + cfg_.horizon_ns));
     }
 
     const std::vector<Trial>& trials() const { return trials_; }
@@ -98,6 +103,7 @@ private:
     void open_trial(std::uint16_t b, std::uint64_t ts) {
         const ob::OrderBook& bk = builder_->book(b);
         if (!bk.has_bid() || !bk.has_ask()) return;
+        if (bk.spread() <= 0) return;  // locked/crossed at sampling: not a joinable queue
         Trial t;
         t.book = b;
         t.price = (cfg_.side == ob::Side::Buy) ? bk.best_bid() : bk.best_ask();
@@ -119,12 +125,14 @@ private:
     }
 
     void step_trial(Trial& t, const Event& ev) {
-        // Trade-through: a display-price execution strictly through our price while we
-        // rest there means the market consumed the whole level — a real order there
-        // would have filled. ('C' fills at non-display prices don't evidence that.)
+        // Trade-through: a display-price execution ON OUR SIDE strictly through our
+        // price while we rest there means the market consumed the whole level — a real
+        // order there would have filled. ('C' fills at non-display prices don't
+        // evidence that, and an OPPOSITE-side order executing beyond our price — a
+        // stale locked/crossed remnant — says nothing about our queue.)
         const bool through = (cfg_.side == ob::Side::Buy) ? (ev.price < t.price)
                                                           : (ev.price > t.price);
-        if (ev.kind == Event::Exec && ev.at_display && through) {
+        if (ev.kind == Event::Exec && ev.at_display && ev.side == cfg_.side && through) {
             if (t.t_first == 0) t.t_first = ev.ts;
             t.remaining = 0;
             t.traded_through = true;
