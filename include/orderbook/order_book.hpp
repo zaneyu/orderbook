@@ -39,8 +39,17 @@ public:
     // Price domain is integer ticks in [0, num_ticks). Orders outside are rejected.
     // `reserve_orders` pre-sizes the node pool and id index so steady-state operation
     // never rehashes or reallocates (recommended for latency-sensitive use).
+    // Public ctor validates FIRST, then delegates: the checked_ticks call sits in the
+    // delegating initializer, which the standard runs before any member of the target
+    // ctor — so validation genuinely precedes all member construction no matter how
+    // the members are declared or reordered.
     explicit OrderBook(Price num_ticks, std::size_t reserve_orders = 0)
-        : num_ticks_(checked_ticks(num_ticks)),
+        : OrderBook(Validated{}, checked_ticks(num_ticks), reserve_orders) {}
+
+private:
+    struct Validated {};  // tag: reach the real ctor only through validation
+    OrderBook(Validated, Price num_ticks, std::size_t reserve_orders)
+        : num_ticks_(num_ticks),
           bid_levels_(static_cast<std::size_t>(num_ticks)),
           ask_levels_(static_cast<std::size_t>(num_ticks)),
           bid_occ_(static_cast<std::size_t>(num_ticks)),
@@ -54,6 +63,7 @@ public:
         }
     }
 
+public:
     // Add a limit order. Any quantity that crosses the book matches immediately at
     // resting prices (price-time priority); the remainder rests. Fills are appended
     // to `out`. Returns the resting (unfilled) quantity. A duplicate/known id or an
@@ -222,10 +232,9 @@ public:
 private:
     static constexpr std::uint32_t NIL = 0xFFFFFFFFu;
 
-    // Validate before ANY member is constructed. A helper (not an inline ternary-throw
-    // on one member's initializer) so correctness doesn't hinge on which member happens
-    // to be declared first — mem-init order follows declaration order, and a refactor
-    // that reordered members would otherwise build multi-GB vectors pre-validation.
+    // Called from the public ctor's delegating initializer, which the standard
+    // evaluates before any member of the target ctor is constructed — see the
+    // Validated tag ctor above for why that ordering is guaranteed.
     static Price checked_ticks(Price n) {
         if (n < 0) throw std::invalid_argument("OrderBook: num_ticks < 0");
         return n;

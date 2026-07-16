@@ -23,11 +23,16 @@ public:
 
     explicit FlatIdMap(std::size_t expected_orders = 0) {
         std::size_t cap = 16;
-        // Keep load factor < ~0.7 for `expected_orders` without growing. The cap bound
-        // stops `cap * 7` from wrapping mod 2^width (past cap = 2^(width-3) the product
-        // wraps and the loop never terminates — reachable only via an absurd reserve,
-        // but a hang is a hang). Width-aware: size_t is 32-bit under wasm32.
+        // Keep load factor < ~0.7 for `expected_orders` without growing. Overflow-safe
+        // on BOTH sides of the comparison: the cap bound stops `cap * 7` wrapping mod
+        // 2^width (past cap = 2^(width-3) the product wraps and the loop never
+        // terminates), and clamping `expected_orders` stops `(expected+1) * 10` from
+        // wrapping (expected >= 2^63 silently sized like expected mod 2^63). Slot
+        // values are u32 so any reserve beyond kMaxCap is meaningless anyway; the
+        // clamped path dies in bad_alloc at .assign, not a hang or a tiny table.
+        // Width-aware: size_t is 32-bit under wasm32.
         constexpr std::size_t kMaxCap = std::size_t{1} << (sizeof(std::size_t) * 8 - 4);
+        if (expected_orders > kMaxCap) expected_orders = kMaxCap;
         while (cap < kMaxCap && cap * 7 < (expected_orders + 1) * 10) cap <<= 1;
         cap_ = cap;
         mask_ = cap_ - 1;
