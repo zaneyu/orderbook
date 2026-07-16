@@ -46,8 +46,10 @@ the clock call (steady_clock, unpinned thread):
 |---------------|--------|--------|--------|------|
 | `rest`        | 42 ns  | 167 ns | 291 ns | pure insert, warm |
 | `cancel`      | 125 ns | 333 ns | 458 ns | dense book, random order — cache-miss variance |
-| `cancel-best` | 41 ns  | 42 ns  | 84 ns  | sparse book, every cancel empties the best level |
+| `cancel-best` | ~42 ns | ≤84 ns | ≤84 ns | sparse book, every cancel empties the best level |
 
+(`cancel-best` values are quantized to the ~42 ns macOS timer tick — everything up to
+p99.9 lands within 1–2 ticks, so read them as "one to two clock ticks", not exact.)
 `cancel-best` is the workload the dense benchmark structurally avoids — every cancel
 forces the bitmap best-refresh — and it's *faster* than the dense case, which is the
 "near-O(1) refresh" claim actually being measured instead of assumed. The p99.9+ far
@@ -75,7 +77,7 @@ The honest boundaries, each pinned by its own audit case (`tests/test_alloc_audi
 which instruments global `new`/`new[]`/aligned-`new` and starts with a positive control
 proving the interception works):
 
-- **Sized book, any op mix** — zero allocations across 100k rests + 100k matches +
+- **Sized book, any op mix** — zero allocations across 200k rests + 100k matches +
   100k cancels, *and* across one market order sweeping 50k makers.
 - **Fills go into your vector.** `match` appends a `Trade` per fill to the
   caller-provided `out`; if you don't reserve it for the deepest sweep you can see, the
@@ -99,8 +101,9 @@ and reused ids, taker tags colliding with resting ids — and half the modifies 
 order's own price to exercise the in-place-decrease branch that uniform draws hit with
 p≈1/4096. 180,000 ops across three fixed seeds locally; CI adds a **run-varying seed**
 (printed on divergence for reproduction) so it explores a new trajectory every push.
-35 test cases across four suites, plus the same differential treatment for the
-supporting data structures:
+36 test cases across four suites, plus the same differential treatment for the
+supporting data structures (including a hash-flood test that inverts the finalizer
+exactly the way an attacker would, and fails if the hash seed is ever dropped):
 
 - `test_orderbook`  — engine vs naive reference book (differential fuzz + units)
 - `test_occupancy`  — the best-pointer bitmap vs a brute-force `std::set`
@@ -141,7 +144,7 @@ The bit-scan touches at most ~`ticks/4096` summary words — O(ticks/4096) worst
 literally O(1); a handful of words for any realistic tick count (16 words at 2^16 ticks),
 with no per-tick linear-scan blowup (the flaw a plain ladder has when the best level
 empties far from the next one). Measured, not assumed: the sparse `cancel-best`
-benchmark drives exactly this path at p99 = 42 ns.
+benchmark drives exactly this path at a p99 of one to two ~42 ns clock ticks.
 
 ## Usage
 

@@ -7,6 +7,7 @@
 // This is what makes the engine's hot path genuinely malloc-free, unlike a
 // node-based std::unordered_map (one heap op per add/cancel/fill).
 //
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -22,8 +23,12 @@ public:
 
     explicit FlatIdMap(std::size_t expected_orders = 0) {
         std::size_t cap = 16;
-        // keep load factor < ~0.7 for `expected_orders` without growing
-        while (cap * 7 < (expected_orders + 1) * 10) cap <<= 1;
+        // Keep load factor < ~0.7 for `expected_orders` without growing. The cap bound
+        // stops `cap * 7` from wrapping mod 2^width (past cap = 2^(width-3) the product
+        // wraps and the loop never terminates — reachable only via an absurd reserve,
+        // but a hang is a hang). Width-aware: size_t is 32-bit under wasm32.
+        constexpr std::size_t kMaxCap = std::size_t{1} << (sizeof(std::size_t) * 8 - 4);
+        while (cap < kMaxCap && cap * 7 < (expected_orders + 1) * 10) cap <<= 1;
         cap_ = cap;
         mask_ = cap_ - 1;
         size_ = 0;
@@ -35,15 +40,26 @@ public:
         // per op (measured ~900x in review). Mixing unpredictable per-instance state
         // into the key first makes that offline precomputation useless. ASLR'd `this`
         // plus a rotating counter is not cryptographic, but the attack requires the
-        // seed and the seed never leaves process memory. Hash choice does not affect
-        // matching results, only probe distribution.
-        static std::uint64_t ctr = 0;  // engine is single-threaded by design
-        ctr += 0x9E3779B97F4A7C15ull;
-        seed_ = mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this)) ^ ctr);
+        // seed and the seed never leaves process memory. (Under wasm there is no ASLR
+        // and the heap is deterministic, so the seed is predictable there — fine for
+        // the demo, whose clients don't choose order ids.) Hash choice does not affect
+        // matching results, only probe distribution. The counter is atomic: each BOOK
+        // is single-threaded, but independent books on independent threads (one per
+        // symbol) may construct concurrently.
+        static std::atomic<std::uint64_t> ctr{0};
+        const std::uint64_t c = ctr.fetch_add(0x9E3779B97F4A7C15ull, std::memory_order_relaxed);
+        seed_ = mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this)) ^ c);
     }
 
     std::size_t size() const { return size_; }
     bool contains(OrderId k) const { return probe(k) != cap_; }
+
+#ifdef OB_TESTING
+    // Test-only: the home bucket of `k` under this instance's seeded hash. Lets the
+    // suite assert the seed actually participates (ids crafted to collide for the
+    // UNSEEDED finalizer must scatter here) without exposing internals in production.
+    std::size_t home_slot(OrderId k) const { return hash(k) & mask_; }
+#endif
 
     // Slot for `k`, or NIL if absent.
     std::uint32_t get(OrderId k) const {

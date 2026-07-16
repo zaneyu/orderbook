@@ -43,9 +43,9 @@ void percentiles(const char* name, std::vector<std::uint32_t>& lat, std::uint32_
         const long v = static_cast<long>(lat[static_cast<std::size_t>(q * (lat.size() - 1))]) - clock_ns;
         return v < 0 ? 0L : v;
     };
+    const long mx = static_cast<long>(lat.back()) - clock_ns;
     std::printf("    %-12s p50 %5ld   p90 %5ld   p99 %5ld   p99.9 %6ld   max %ld\n", name,
-                pct(0.50), pct(0.90), pct(0.99), pct(0.999),
-                static_cast<long>(lat.back()) - clock_ns);
+                pct(0.50), pct(0.90), pct(0.99), pct(0.999), mx < 0 ? 0L : mx);
 }
 
 }  // namespace

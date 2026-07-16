@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mymindstorm/setup-emsdk@v14
       - name: compile engine + bindings to wasm
-        run: ./web/build-wasm.sh
+        run: bash web/build-wasm.sh  # bash, not ./: robust to a lost executable bit
       - name: typecheck + build the app
         run: |
           cd web/app

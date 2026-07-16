@@ -40,8 +40,7 @@ public:
     // `reserve_orders` pre-sizes the node pool and id index so steady-state operation
     // never rehashes or reallocates (recommended for latency-sensitive use).
     explicit OrderBook(Price num_ticks, std::size_t reserve_orders = 0)
-        : num_ticks_((num_ticks < 0 ? throw std::invalid_argument("OrderBook: num_ticks < 0")
-                                    : num_ticks)),
+        : num_ticks_(checked_ticks(num_ticks)),
           bid_levels_(static_cast<std::size_t>(num_ticks)),
           ask_levels_(static_cast<std::size_t>(num_ticks)),
           bid_occ_(static_cast<std::size_t>(num_ticks)),
@@ -186,6 +185,8 @@ public:
 
     // Per-order walk of one price level in FIFO (time-priority) order, calling
     // f(order_id, remaining_qty). O(orders at the level); for market data/diagnostics.
+    // The callback must not mutate the book (as with for_levels): the walk holds raw
+    // slot indices, and a cancel/add inside f would traverse freed or reused nodes.
     template <typename F>
     void for_orders(Side side, Price price, F&& f) const {
         if (price < 0 || price >= num_ticks_) return;
@@ -197,6 +198,7 @@ public:
 
     // L2 snapshot: visit up to `depth` populated levels from the best inward,
     // calling f(price, aggregate_qty). O(depth) via the occupancy bitmap.
+    // The callback must not mutate the book — the walk reads live level state.
     template <typename F>
     void for_levels(Side side, int depth, F&& f) const {
         if (side == Side::Buy) {
@@ -219,6 +221,15 @@ public:
 
 private:
     static constexpr std::uint32_t NIL = 0xFFFFFFFFu;
+
+    // Validate before ANY member is constructed. A helper (not an inline ternary-throw
+    // on one member's initializer) so correctness doesn't hinge on which member happens
+    // to be declared first — mem-init order follows declaration order, and a refactor
+    // that reordered members would otherwise build multi-GB vectors pre-validation.
+    static Price checked_ticks(Price n) {
+        if (n < 0) throw std::invalid_argument("OrderBook: num_ticks < 0");
+        return n;
+    }
 
     struct Node {
         OrderId id;

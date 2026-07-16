@@ -1,9 +1,12 @@
-// Differential fuzz of FlatIdMap against std::unordered_map, plus an allocation
-// audit proving that a correctly-sized map performs zero heap ops on the hot path.
+// Differential fuzz of FlatIdMap against std::unordered_map, an allocation audit
+// proving that a correctly-sized map performs zero heap ops on the hot path, and a
+// hash-flood test proving the per-instance seed actually participates in the hash.
+#define OB_TESTING  // enables FlatIdMap::home_slot for the seed test
 #include <cstdint>
 #include <cstdlib>
 #include <new>
 #include <random>
+#include <set>
 #include <unordered_map>
 
 #include "framework.hpp"
@@ -73,6 +76,46 @@ TEST(flat_map_survives_growth) {
         if (m.get(k) != static_cast<std::uint32_t>(k)) ++bad;
     CHECK_EQ(bad, 0);
     CHECK_EQ(m.size(), std::size_t{5000});
+}
+
+namespace {
+// The forward splitmix64 finalizer (what FlatIdMap mixes with) and its published
+// inverse. The test derives collision sets exactly the way an attacker would.
+std::uint64_t fwd_mix(std::uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+std::uint64_t inv_mix(std::uint64_t x) {
+    x = (x ^ (x >> 31) ^ (x >> 62)) * 0x319642B2D24D8EC3ull;
+    x = (x ^ (x >> 27) ^ (x >> 54)) * 0x96DE1B173F119089ull;
+    x = x ^ (x >> 30) ^ (x >> 60);
+    return x - 0x9E3779B97F4A7C15ull;
+}
+}  // namespace
+
+TEST(hash_seed_defeats_precomputed_collisions) {
+    // The unseeded finalizer is a public bijection: an attacker inverts it to mint ids
+    // that all share one home bucket, collapsing probing to O(n) (~900x measured). The
+    // per-instance seed is the defense — and this test is what notices if a refactor
+    // silently drops it (a seedless mutant previously survived the ENTIRE suite).
+    CHECK_EQ(inv_mix(fwd_mix(0x123456789ABCDEFull)), std::uint64_t{0x123456789ABCDEF});
+    CHECK_EQ(fwd_mix(inv_mix(42)), std::uint64_t{42});
+
+    constexpr int N = 48;
+    FlatIdMap m(N);  // cap 128, mask 127 — matches the ctor's sizing rule for 48
+    std::set<std::size_t> homes;
+    for (int j = 0; j < N; ++j) {
+        // id whose UNSEEDED hash lands in bucket 5 of a 128-slot table
+        const OrderId id = inv_mix(5ull + (static_cast<std::uint64_t>(j) << 7));
+        m.set(id, static_cast<std::uint32_t>(j));
+        homes.insert(m.home_slot(id));
+    }
+    CHECK_EQ(m.size(), std::size_t{N});
+    // Unseeded, all 48 ids share ONE home bucket. Seeded, they scatter like random
+    // keys — demand well more than 1 without flaking (P(<=8 distinct of 128) ~ 0).
+    CHECK(homes.size() > 8);
 }
 
 TEST(preallocated_map_is_allocation_free) {
