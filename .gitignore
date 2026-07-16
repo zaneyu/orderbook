@@ -18,3 +18,5 @@ compile_commands.json
 /test_occupancy
 /test_flat_id_map
 /test_alloc_audit
+itch_replay
+queue_sim
