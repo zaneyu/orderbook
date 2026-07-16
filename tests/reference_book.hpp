@@ -11,6 +11,7 @@
 #include <deque>
 #include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "orderbook/types.hpp"
@@ -87,10 +88,21 @@ public:
                         jt->qty = new_qty;  // in-place, keeps priority
                         return true;
                     }
+                    if (new_qty == 0) {  // documented: new_qty == 0 cancels
+                        it->second.erase(jt);
+                        if (it->second.empty()) book.erase(it);
+                        ids_.erase(id);
+                        return true;
+                    }
+                    // Contract: an out-of-range target price rejects the modify and
+                    // leaves the order untouched — checked BEFORE erasing. (This oracle
+                    // used to erase first and let add_limit reject, silently destroying
+                    // the order the fast book correctly preserves.)
+                    if (new_price < 0 || new_price >= num_ticks_) return false;
                     it->second.erase(jt);
                     if (it->second.empty()) book.erase(it);
                     ids_.erase(id);
-                    if (new_qty > 0) add_limit(id, side, new_price, new_qty, out);
+                    add_limit(id, side, new_price, new_qty, out);
                     return true;
                 }
             }
@@ -109,14 +121,26 @@ public:
     Price best_bid() const { return bids_.rbegin()->first; }
     Price best_ask() const { return asks_.begin()->first; }
 
-    Qty qty_at(Side side, Price price) const {
+    std::uint64_t qty_at(Side side, Price price) const {
         const auto& book = (side == Side::Buy) ? bids_ : asks_;
         auto it = book.find(price);
         if (it == book.end()) return 0;
-        Qty s = 0;
+        std::uint64_t s = 0;  // 64-bit: a level's total can exceed one order's Qty range
         for (const auto& o : it->second) s += o.qty;
         return s;
     }
+
+    // Per-order FIFO at one level (oldest first), for deep differential comparison.
+    std::vector<std::pair<OrderId, Qty>> orders_at(Side side, Price price) const {
+        std::vector<std::pair<OrderId, Qty>> v;
+        const auto& book = (side == Side::Buy) ? bids_ : asks_;
+        auto it = book.find(price);
+        if (it != book.end())
+            for (const auto& o : it->second) v.emplace_back(o.id, o.qty);
+        return v;
+    }
+
+    std::size_t resting_orders() const { return ids_.size(); }
 
 private:
     struct Resting { OrderId id; Qty qty; };

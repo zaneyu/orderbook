@@ -135,20 +135,84 @@ TEST(l2_snapshot_walks_populated_levels_from_best) {
     b.add_limit(1, Side::Buy, 100, 5, fills);
     b.add_limit(2, Side::Buy, 98, 3, fills);  // gap at 99
     b.add_limit(3, Side::Buy, 98, 2, fills);  // aggregates to 5 at 98
-    std::vector<std::pair<Price, Qty>> lv;
-    b.for_levels(Side::Buy, 10, [&](Price p, Qty q) { lv.emplace_back(p, q); });
+    std::vector<std::pair<Price, std::uint64_t>> lv;
+    b.for_levels(Side::Buy, 10, [&](Price p, std::uint64_t q) { lv.emplace_back(p, q); });
     CHECK_EQ(lv.size(), std::size_t{2});
     CHECK_EQ(lv[0].first, Price{100});
-    CHECK_EQ(lv[0].second, Qty{5});
+    CHECK_EQ(lv[0].second, std::uint64_t{5});
     CHECK_EQ(lv[1].first, Price{98});   // empty 99 skipped
-    CHECK_EQ(lv[1].second, Qty{5});
+    CHECK_EQ(lv[1].second, std::uint64_t{5});
 
     b.add_limit(4, Side::Sell, 105, 4, fills);
     b.add_limit(5, Side::Sell, 107, 1, fills);
-    std::vector<std::pair<Price, Qty>> la;
-    b.for_levels(Side::Sell, 1, [&](Price p, Qty q) { la.emplace_back(p, q); });  // depth cap
+    std::vector<std::pair<Price, std::uint64_t>> la;
+    b.for_levels(Side::Sell, 1, [&](Price p, std::uint64_t q) { la.emplace_back(p, q); });  // depth cap
     CHECK_EQ(la.size(), std::size_t{1});
     CHECK_EQ(la[0].first, Price{105});
+}
+
+TEST(l2_snapshot_at_tick_zero_terminates) {
+    // A bid resting at tick 0 must END the walk, not wrap the cursor back to the top
+    // of the ladder and silently re-visit levels (the occupancy clamp would allow it).
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 0, 5, fills);
+    b.add_limit(2, Side::Buy, 2, 3, fills);
+    std::vector<std::pair<Price, std::uint64_t>> lv;
+    b.for_levels(Side::Buy, 10, [&](Price p, std::uint64_t q) { lv.emplace_back(p, q); });
+    CHECK_EQ(lv.size(), std::size_t{2});
+    CHECK_EQ(lv[0].first, Price{2});
+    CHECK_EQ(lv[1].first, Price{0});
+}
+
+TEST(spread_is_ask_minus_bid) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 100, 5, fills);
+    b.add_limit(2, Side::Sell, 103, 5, fills);
+    CHECK_EQ(b.spread(), Price{3});
+}
+
+TEST(for_orders_walks_fifo_at_level) {
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 100, 5, fills);
+    b.add_limit(2, Side::Buy, 100, 7, fills);
+    std::vector<std::pair<OrderId, Qty>> fo;
+    b.for_orders(Side::Buy, 100, [&](OrderId id, Qty q) { fo.emplace_back(id, q); });
+    CHECK_EQ(fo.size(), std::size_t{2});
+    CHECK_EQ(fo[0].first, OrderId{1});  // oldest first (time priority)
+    CHECK_EQ(fo[0].second, Qty{5});
+    CHECK_EQ(fo[1].first, OrderId{2});
+    CHECK_EQ(fo[1].second, Qty{7});
+}
+
+TEST(level_total_beyond_u32_stays_exact) {
+    // Many u32-sized orders at one price exceed a u32 aggregate. With a 32-bit total
+    // this wrapped: qty_at reported 0 and FOK falsely killed a fillable order.
+    OrderBook b(64);
+    fills.clear();
+    b.add_limit(1, Side::Sell, 5, 0x80000000u, fills);
+    b.add_limit(2, Side::Sell, 5, 0x80000000u, fills);  // level total = 2^32 exactly
+    CHECK_EQ(b.qty_at(Side::Sell, 5), std::uint64_t{0x100000000ull});
+    CHECK(b.can_fill(Side::Buy, 5, 4000000000u));
+    fills.clear();
+    CHECK_EQ(b.add_fok(3, Side::Buy, 5, 1, fills), Qty{0});
+    CHECK_EQ(fills.size(), std::size_t{1});
+}
+
+TEST(market_taker_id_may_collide_with_resting_id) {
+    // market/IOC/FOK ids are tags on emitted fills, not indexed — a collision with a
+    // resting order's id must not reject the taker.
+    OrderBook b(TICKS);
+    fills.clear();
+    b.add_limit(1, Side::Buy, 99, 5, fills);
+    b.add_limit(2, Side::Sell, 101, 5, fills);
+    fills.clear();
+    CHECK_EQ(b.add_market(1, Side::Buy, 3, fills), Qty{0});  // taker tag == resting id 1
+    CHECK_EQ(fills.size(), std::size_t{1});
+    CHECK_EQ(fills[0].taker, OrderId{1});
+    CHECK_EQ(fills[0].maker, OrderId{2});
 }
 
 // ------------------------------------------------------ order-type unit scenarios
@@ -191,11 +255,25 @@ TEST(modify_decrease_keeps_priority) {
     b.add_limit(1, Side::Buy, 100, 10, fills);  // older
     b.add_limit(2, Side::Buy, 100, 10, fills);  // younger
     CHECK(b.modify(1, 100, 5, fills));          // shrink same price -> keeps front slot
+    // The level AGGREGATE must shrink too, not just the node: a mutant that dropped
+    // the total update passed the whole suite because only later fills (which read
+    // per-node qty) were asserted.
+    CHECK_EQ(b.qty_at(Side::Buy, 100), std::uint64_t{15});
     fills.clear();
     b.add_limit(3, Side::Sell, 100, 6, fills);  // hits id1 (5) then id2 (1)
     CHECK_EQ(fills[0].maker, OrderId{1});
     CHECK_EQ(fills[0].qty, Qty{5});
     CHECK_EQ(fills[1].maker, OrderId{2});
+    CHECK_EQ(b.qty_at(Side::Buy, 100), std::uint64_t{9});
+}
+
+TEST(can_fill_zero_qty_is_trivially_true) {
+    OrderBook b(TICKS);
+    CHECK(b.can_fill(Side::Buy, 100, 0));  // empty book: "fill nothing" still succeeds
+    fills.clear();
+    b.add_limit(1, Side::Sell, 100, 5, fills);
+    CHECK(b.can_fill(Side::Buy, 100, 0));
+    CHECK(b.can_fill(Side::Sell, 100, 0));
 }
 
 TEST(modify_increase_loses_priority) {
@@ -236,14 +314,39 @@ TEST(modify_to_out_of_range_price_is_rejected_and_preserves_order) {
 
 namespace {
 
-// Compare fast and reference book state exhaustively for one op's result.
+// Compare fast and reference book state exhaustively: emptiness, bests, live-order
+// count, per-level aggregates, the per-order FIFO (id + remaining qty in time
+// priority) at every populated level, and the L2 snapshot walk. Aggregate-only
+// comparison let a real modify bug through: per-node qty stayed right while the
+// level total corrupted, and nothing ever read the total.
 bool same_state(const OrderBook& fast, const ReferenceBook& ref) {
     if (fast.has_bid() != ref.has_bid() || fast.has_ask() != ref.has_ask()) return false;
     if (fast.has_bid() && fast.best_bid() != ref.best_bid()) return false;
     if (fast.has_ask() && fast.best_ask() != ref.best_ask()) return false;
-    for (Price p = 0; p < TICKS; ++p) {
-        if (fast.qty_at(Side::Buy, p) != ref.qty_at(Side::Buy, p)) return false;
-        if (fast.qty_at(Side::Sell, p) != ref.qty_at(Side::Sell, p)) return false;
+    if (fast.resting_orders() != ref.resting_orders()) return false;
+    std::vector<std::pair<OrderId, Qty>> fo;
+    for (const Side s : {Side::Buy, Side::Sell}) {
+        for (Price p = 0; p < TICKS; ++p) {
+            if (fast.qty_at(s, p) != ref.qty_at(s, p)) return false;
+            if (fast.qty_at(s, p) == 0) continue;
+            fo.clear();
+            fast.for_orders(s, p, [&](OrderId id, Qty q) { fo.emplace_back(id, q); });
+            if (fo != ref.orders_at(s, p)) return false;
+        }
+        // The L2 walk must agree too — for_levels was previously untested under fuzz,
+        // and a mutant corrupting its ladder-edge termination survived the suite.
+        std::vector<std::pair<Price, std::uint64_t>> fl;
+        fast.for_levels(s, TICKS, [&](Price p, std::uint64_t q) { fl.emplace_back(p, q); });
+        std::vector<std::pair<Price, std::uint64_t>> rl;
+        if (s == Side::Buy && ref.has_bid())
+            for (Price p = ref.best_bid(); p >= 0; --p) {
+                if (const auto q = ref.qty_at(s, p)) rl.emplace_back(p, q);
+            }
+        if (s == Side::Sell && ref.has_ask())
+            for (Price p = ref.best_ask(); p < TICKS; ++p) {
+                if (const auto q = ref.qty_at(s, p)) rl.emplace_back(p, q);
+            }
+        if (fl != rl) return false;
     }
     return true;
 }
@@ -252,58 +355,111 @@ void run_fuzz(std::uint64_t seed, int n_ops) {
     OrderBook fast(TICKS);
     ReferenceBook ref(TICKS);
     std::mt19937_64 rng(seed);
-    std::vector<OrderId> live;  // resting ids (may contain stale entries; filtered on use)
+    struct LiveOrder { OrderId id; Price price; };
+    std::vector<LiveOrder> live;  // resting ids + last-set price (pruned when found stale)
     OrderId next_id = 1;
     std::vector<Trade> fa, rb;
     int mismatches = 0;
+    bool reported = false;
 
     auto pick_price = [&] { return static_cast<Price>(rng() % TICKS); };
     auto pick_qty = [&] { return static_cast<Qty>(1 + rng() % 50); };
+    // ~6% of ops draw inputs the happy-path generators can never produce: ladder-edge
+    // and out-of-range prices, zero and near-2^32 quantities, and id collisions.
+    // Rejection paths that fuzz never reaches are rejection paths that don't work —
+    // and huge quantities regression-test the u64 level totals.
+    auto adversarial = [&] { return rng() % 16 == 0; };
+    auto pick_adv_price = [&]() -> Price {
+        switch (rng() % 5) {
+            case 0: return -1;
+            case 1: return 0;
+            case 2: return TICKS - 1;
+            case 3: return TICKS;
+            default: return pick_price();
+        }
+    };
+    auto pick_adv_qty = [&]() -> Qty {
+        switch (rng() % 4) {
+            case 0: return 0;
+            case 1: return 0x80000000u;
+            case 2: return 0xFFFFFFFFu;
+            default: return pick_qty();
+        }
+    };
 
     for (int i = 0; i < n_ops && mismatches == 0; ++i) {
         const int roll = static_cast<int>(rng() % 100);
         fa.clear();
         rb.clear();
-        if (roll < 40) {  // add limit
-            const OrderId id = next_id++;
+        const char* op = "?";
+        if (roll < 40) {  // add limit (sometimes reusing an old id: dup ids must reject)
+            op = "add_limit";
+            const bool adv = adversarial();
+            const OrderId id = (adv && !live.empty() && (rng() & 1))
+                                   ? live[rng() % live.size()].id
+                                   : next_id++;
             const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
-            const Price price = pick_price();
-            const Qty qty = pick_qty();
+            const Price price = adv ? pick_adv_price() : pick_price();
+            const Qty qty = adv ? pick_adv_qty() : pick_qty();
             const Qty r1 = fast.add_limit(id, side, price, qty, fa);
             const Qty r2 = ref.add_limit(id, side, price, qty, rb);
             if (r1 != r2) ++mismatches;
-            if (r1 > 0) live.push_back(id);
-        } else if (roll < 52) {  // market
+            if (r1 > 0) live.push_back({id, price});
+        } else if (roll < 52) {  // market (taker tag may collide with a resting id)
+            op = "add_market";
+            const OrderId id = (!live.empty() && rng() % 8 == 0) ? live[rng() % live.size()].id
+                                                                 : next_id++;
             const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
-            const Qty qty = pick_qty();
-            if (fast.add_market(next_id, side, qty, fa) != ref.add_market(next_id, side, qty, rb))
+            const Qty qty = adversarial() ? pick_adv_qty() : pick_qty();
+            if (fast.add_market(id, side, qty, fa) != ref.add_market(id, side, qty, rb))
                 ++mismatches;
-            ++next_id;
         } else if (roll < 64) {  // IOC
+            op = "add_ioc";
             const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
-            const Price price = pick_price();
-            const Qty qty = pick_qty();
+            const bool adv = adversarial();
+            const Price price = adv ? pick_adv_price() : pick_price();
+            const Qty qty = adv ? pick_adv_qty() : pick_qty();
             if (fast.add_ioc(next_id, side, price, qty, fa) != ref.add_ioc(next_id, side, price, qty, rb))
                 ++mismatches;
             ++next_id;
         } else if (roll < 76) {  // FOK
+            op = "add_fok";
             const Side side = (rng() & 1) ? Side::Buy : Side::Sell;
-            const Price price = pick_price();
-            const Qty qty = pick_qty();
+            const bool adv = adversarial();
+            const Price price = adv ? pick_adv_price() : pick_price();
+            const Qty qty = adv ? pick_adv_qty() : pick_qty();
             if (fast.add_fok(next_id, side, price, qty, fa) != ref.add_fok(next_id, side, price, qty, rb))
                 ++mismatches;
             ++next_id;
-        } else if (roll < 88 && !live.empty()) {  // modify a (possibly stale) id
-            const OrderId id = live[rng() % live.size()];
-            const Price np = pick_price();
-            const Qty nq = (rng() % 8 == 0) ? 0 : pick_qty();  // occasionally modify-cancels
+        } else if (roll < 88 && !live.empty()) {  // modify
+            op = "modify";
+            const std::size_t k = rng() % live.size();
+            const OrderId id = live[k].id;
+            Price np;
+            Qty nq;
+            if (rng() & 1) {
+                // Half the modifies target the order's OWN price with a small qty: the
+                // in-place-decrease branch. Uniform draws hit it with p ~ 1/TICKS —
+                // measured 0 times in 180k ops, which is how a real bug there survived.
+                np = live[k].price;
+                nq = 1 + static_cast<Qty>(rng() % 8);
+            } else {
+                np = adversarial() ? pick_adv_price() : pick_price();
+                nq = (rng() % 8 == 0) ? 0 : pick_qty();
+            }
             const bool m1 = fast.modify(id, np, nq, fa);
             const bool m2 = ref.modify(id, np, nq, rb);
             if (m1 != m2) ++mismatches;
-            if (m1 && nq > 0) live.push_back(id);  // may rest again under same id
+            if (!m1 || nq == 0) {  // stale id or modify-cancel: prune the entry
+                live[k] = live.back();
+                live.pop_back();
+            } else if (np >= 0 && np < TICKS) {
+                live[k].price = np;  // may have re-rested at the new price
+            }
         } else if (!live.empty()) {  // cancel a (possibly stale) id
+            op = "cancel";
             const std::size_t k = rng() % live.size();
-            const OrderId id = live[k];
+            const OrderId id = live[k].id;
             live[k] = live.back();
             live.pop_back();
             if (fast.cancel(id) != ref.cancel(id)) ++mismatches;
@@ -312,6 +468,11 @@ void run_fuzz(std::uint64_t seed, int n_ops) {
         // Full O(ticks) state comparison periodically (cheap per-op check is the fills
         // above); a divergence is still caught within the window and asserted below.
         if ((i & 15) == 0 && !same_state(fast, ref)) ++mismatches;
+        if (mismatches && !reported) {  // make a CI fuzz failure debuggable from the log
+            reported = true;
+            std::printf("    fuzz divergence: seed=%llu op=%d (%s)\n",
+                        static_cast<unsigned long long>(seed), i, op);
+        }
     }
     if (!same_state(fast, ref)) ++mismatches;  // exhaustive final check
     CHECK_EQ(mismatches, 0);
@@ -322,5 +483,12 @@ void run_fuzz(std::uint64_t seed, int n_ops) {
 TEST(fuzz_matches_reference_seed1) { run_fuzz(1, kFuzzOps); }
 TEST(fuzz_matches_reference_seed2) { run_fuzz(1337, kFuzzOps); }
 TEST(fuzz_matches_reference_seed3) { run_fuzz(0xDEADBEEF, kFuzzOps); }
+
+// CI also passes -DFUZZ_EXTRA_SEED=$GITHUB_RUN_ID: fixed seeds replay the identical
+// trajectory forever, so CI-over-time adds no coverage without one varying seed.
+// The seed is printed on divergence, so any failure is reproducible locally.
+#ifdef FUZZ_EXTRA_SEED
+TEST(fuzz_matches_reference_run_seed) { run_fuzz(FUZZ_EXTRA_SEED, kFuzzOps); }
+#endif
 
 int main() { return tf::run(); }

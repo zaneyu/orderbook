@@ -7,6 +7,7 @@
 // This is what makes the engine's hot path genuinely malloc-free, unlike a
 // node-based std::unordered_map (one heap op per add/cancel/fill).
 //
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -28,6 +29,17 @@ public:
         size_ = 0;
         keys_.assign(cap_, 0);
         vals_.assign(cap_, NIL);
+        // Per-instance hash seed. The splitmix64 finalizer alone is a FIXED, publicly
+        // invertible bijection: a caller who controls order ids can precompute a set
+        // that collides on the table's low bits and collapse linear probing to O(n)
+        // per op (measured ~900x in review). Mixing unpredictable per-instance state
+        // into the key first makes that offline precomputation useless. ASLR'd `this`
+        // plus a rotating counter is not cryptographic, but the attack requires the
+        // seed and the seed never leaves process memory. Hash choice does not affect
+        // matching results, only probe distribution.
+        static std::uint64_t ctr = 0;  // engine is single-threaded by design
+        ctr += 0x9E3779B97F4A7C15ull;
+        seed_ = mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(this)) ^ ctr);
     }
 
     std::size_t size() const { return size_; }
@@ -43,6 +55,7 @@ public:
     // ~0.7 — which never happens after a correctly sized construction. Steady-state
     // allocation-freedom therefore requires passing `expected_orders` to the ctor.
     void set(OrderId k, std::uint32_t v) {
+        assert(v != NIL);  // NIL aliases the empty sentinel and would silently vanish
         if ((size_ + 1) * 10 >= cap_ * 7) grow();
         std::size_t i = hash(k) & mask_;
         while (vals_[i] != NIL) {
@@ -106,18 +119,21 @@ private:
     }
 
     // splitmix64 finalizer: strong avalanche for integer keys.
-    static std::uint64_t hash(std::uint64_t x) {
+    static std::uint64_t mix(std::uint64_t x) {
         x += 0x9E3779B97F4A7C15ull;
         x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
         x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
         return x ^ (x >> 31);
     }
+    // Seeded per instance (see ctor) so collision sets can't be computed offline.
+    std::uint64_t hash(std::uint64_t x) const { return mix(x ^ seed_); }
 
     std::vector<OrderId> keys_;
     std::vector<std::uint32_t> vals_;
     std::size_t cap_;
     std::size_t mask_;
     std::size_t size_;
+    std::uint64_t seed_;
 };
 
 }  // namespace ob

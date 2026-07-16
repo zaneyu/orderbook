@@ -13,12 +13,19 @@
 //   cancel    : O(1) unlink + near-O(1) best refresh when a best level empties
 //   match     : O(1) per fill + near-O(1) best refresh per emptied level
 //
-// All hot paths are allocation-free once sized: order nodes come from a free list and
-// the id->slot index is an open-addressing flat map (flat_id_map.hpp), not a node-based
-// std::unordered_map. tests/test_alloc_audit.cpp proves zero new/delete on the hot path.
+// Allocation contract: once constructed with `reserve_orders` >= peak live orders, the
+// ENGINE performs no heap allocations of its own on add/cancel/match — nodes come from
+// a free list and the id->slot index is an open-addressing flat map (flat_id_map.hpp).
+// Fills are appended to the CALLER-provided `out` vector, which grows like any vector:
+// a taker sweeping N makers appends N trades, so callers on a latency budget must
+// reserve `out` for the deepest sweep they can see. Under-reserving `reserve_orders`
+// (or the default 0) allocates amortized on pool growth / index rehash.
+// tests/test_alloc_audit.cpp measures exactly these envelopes.
 //
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "flat_id_map.hpp"
@@ -33,7 +40,8 @@ public:
     // `reserve_orders` pre-sizes the node pool and id index so steady-state operation
     // never rehashes or reallocates (recommended for latency-sensitive use).
     explicit OrderBook(Price num_ticks, std::size_t reserve_orders = 0)
-        : num_ticks_(num_ticks),
+        : num_ticks_((num_ticks < 0 ? throw std::invalid_argument("OrderBook: num_ticks < 0")
+                                    : num_ticks)),
           bid_levels_(static_cast<std::size_t>(num_ticks)),
           ask_levels_(static_cast<std::size_t>(num_ticks)),
           bid_occ_(static_cast<std::size_t>(num_ticks)),
@@ -115,6 +123,7 @@ public:
 
     // True if a `side` taker at `price` could be fully filled (>= qty) immediately.
     bool can_fill(Side taker, Price limit, Qty qty) const {
+        if (qty == 0) return true;  // "fill nothing" is trivially satisfiable, book or no book
         std::uint64_t acc = 0;
         if (taker == Side::Buy) {
             for (Price p = best_ask_; p < num_ticks_ && p <= limit;) {
@@ -163,14 +172,27 @@ public:
     bool has_ask() const { return best_ask_ < num_ticks_; }
     Price best_bid() const { return best_bid_; }
     Price best_ask() const { return best_ask_; }
+    // Meaningful only when has_bid() && has_ask(); otherwise it mixes the sentinels.
     Price spread() const { return best_ask_ - best_bid_; }
     Price num_ticks() const { return num_ticks_; }
     std::size_t resting_orders() const { return id_map_.size(); }
 
     // Aggregate resting quantity at a price level (0 if none / out of range).
-    Qty qty_at(Side side, Price price) const {
+    // 64-bit: a level's total can exceed one order's 32-bit Qty range.
+    std::uint64_t qty_at(Side side, Price price) const {
         if (price < 0 || price >= num_ticks_) return 0;
         return (side == Side::Buy ? bid_levels_ : ask_levels_)[static_cast<std::size_t>(price)].total;
+    }
+
+    // Per-order walk of one price level in FIFO (time-priority) order, calling
+    // f(order_id, remaining_qty). O(orders at the level); for market data/diagnostics.
+    template <typename F>
+    void for_orders(Side side, Price price, F&& f) const {
+        if (price < 0 || price >= num_ticks_) return;
+        const auto& levels = (side == Side::Buy) ? bid_levels_ : ask_levels_;
+        for (std::uint32_t s = levels[static_cast<std::size_t>(price)].head; s != NIL;
+             s = pool_[s].next)
+            f(pool_[s].id, pool_[s].qty);
     }
 
     // L2 snapshot: visit up to `depth` populated levels from the best inward,
@@ -209,7 +231,10 @@ private:
     struct Level {
         std::uint32_t head = NIL;  // oldest resting order
         std::uint32_t tail = NIL;  // newest
-        Qty total = 0;
+        // 64-bit on purpose: many u32-sized orders at one price overflow a u32 total,
+        // silently corrupting qty_at/can_fill and making FOK falsely kill fillable
+        // orders. The extra 4 bytes (Level: 12 -> 16, still 4/cache line) buy exactness.
+        std::uint64_t total = 0;
     };
 
     std::uint32_t alloc(OrderId id, Price price, Qty qty, Side side) {
@@ -219,6 +244,7 @@ private:
             free_.pop_back();
             pool_[slot] = Node{id, price, qty, NIL, NIL, side};
         } else {
+            assert(pool_.size() < NIL);  // slot NIL aliases the id-map's empty sentinel
             slot = static_cast<std::uint32_t>(pool_.size());
             pool_.push_back(Node{id, price, qty, NIL, NIL, side});
         }
