@@ -26,10 +26,10 @@ jobs:
       # the seed is printed on divergence for local reproduction.
       - name: asan + ubsan
         run: |
-          for t in test_orderbook test_occupancy test_flat_id_map test_alloc_audit; do
+          for t in test_orderbook test_occupancy test_flat_id_map test_alloc_audit test_itch; do
             c++ -std=c++20 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
                 -DFUZZ_OPS=20000 -DFUZZ_EXTRA_SEED=${{ github.run_id }}ull \
-                -Iinclude -Itests tests/$t.cpp -o $t.asan
+                -Iinclude -Itests -I. tests/$t.cpp -o $t.asan
             ./$t.asan
           done
 
